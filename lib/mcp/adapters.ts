@@ -1,5 +1,6 @@
 import { mcpClientManager } from './manager';
 import { MCPHostError } from './types';
+import { withTimeout } from '@/lib/ai/debug/timeout-detector';
 
 const WEATHER_SERVER_ID = 'weather-server';
 const WEATHER_TOOL_NAME = 'get_weather';
@@ -22,7 +23,7 @@ export async function weatherToolAdapter(input: WeatherToolAdapterInput): Promis
   console.log(`[DEBUG-MCP-ADAPTER] weatherToolAdapter called with city: ${input.city}`);
   
   const start = Date.now();
-  const response = await mcpClientManager.callTool(WEATHER_SERVER_ID, WEATHER_TOOL_NAME, { city: input.city });
+  const response = await withTimeout(`mcpClientManager.callTool get_weather ${input.city}`, mcpClientManager.callTool(WEATHER_SERVER_ID, WEATHER_TOOL_NAME, { city: input.city }), { timeoutMs: 25000 });
   
   const elapsed = Date.now() - start;
   console.log(`[DEBUG-MCP-ADAPTER] weatherToolAdapter completed in ${elapsed}ms`);

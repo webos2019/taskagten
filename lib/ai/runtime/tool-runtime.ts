@@ -3,6 +3,7 @@ import { toolRegistry } from "@/lib/tool-registry";
 import { mcpClientManager } from "@/lib/mcp/manager";
 import { weatherToolAdapter, projectFileResourceAdapter, listFilesAdapter } from "@/lib/mcp/adapters";
 import { ChatStreamChunk, createToolCallChunk, createToolResultChunk, createResourceStartChunk, createResourceEndChunk, createResourceErrorChunk } from "@/lib/ai/stream";
+import { withTimeout } from "@/lib/ai/debug/timeout-detector";
 
 const WEATHER_SERVER_ID = 'weather-server';
 const PROJECT_FILES_SERVER_ID = 'project-files-server';
@@ -101,7 +102,7 @@ export async function executeTool(
 
     try {
       const start = Date.now();
-      const mcpResult = await weatherToolAdapter({ city: String(args.city || "") });
+      const mcpResult = await withTimeout(`weatherToolAdapter ${args.city}`, weatherToolAdapter({ city: String(args.city || "") }), { timeoutMs: 30000 });
       const elapsed = Date.now() - start;
       console.log(`[DEBUG-TOOL-RUNTIME] weatherToolAdapter completed in ${elapsed}ms`);
       

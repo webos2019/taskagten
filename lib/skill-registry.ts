@@ -1,5 +1,6 @@
 import { toolRegistry, type ChatToolDefinition } from "./tool-registry";
 import type { StructuredToolInterface } from "@langchain/core/tools";
+import type { SkillDefinition as CapabilitySkillDefinition, CapabilitySelector } from "./capability/types";
 
 export type SkillOutputPolicy = "concise-utility" | "detailed-explanation" | "creative";
 export type SkillResultPolicy = "tool-first" | "summary-first" | "auto";
@@ -15,6 +16,8 @@ export interface SkillMeta {
   routingHints?: string[];
   default?: boolean;
   tags?: string[];
+  capabilitySelectors?: CapabilitySelector[];
+  fallbackPolicy?: "direct-answer" | "skip-capability" | "retry";
 }
 
 export interface RegisteredSkill {
@@ -25,6 +28,9 @@ export interface RegisteredSkill {
   getOutputPolicy(): SkillOutputPolicy;
   getResultPolicy(): SkillResultPolicy;
   getRoutingHints(): string[];
+  getCapabilitySelectors(): CapabilitySelector[];
+  getFallbackPolicy(): "direct-answer" | "skip-capability" | "retry";
+  toCapabilityDefinition(): CapabilitySkillDefinition;
 }
 
 export class SkillRegistry {
@@ -61,6 +67,24 @@ export class SkillRegistry {
       },
       getRoutingHints() {
         return meta.routingHints || [];
+      },
+      getCapabilitySelectors() {
+        return meta.capabilitySelectors || [];
+      },
+      getFallbackPolicy() {
+        return meta.fallbackPolicy || "direct-answer";
+      },
+      toCapabilityDefinition(): CapabilitySkillDefinition {
+        return {
+          skillId: meta.id,
+          name: meta.name,
+          description: meta.description,
+          systemPrompt: meta.systemPrompt,
+          allowedTools: meta.toolNames,
+          sourceKinds: ["mcp"],
+          capabilitySelectors: meta.capabilitySelectors || [],
+          fallbackPolicy: meta.fallbackPolicy || "direct-answer",
+        };
       },
     });
 

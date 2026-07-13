@@ -7,6 +7,8 @@ import type { ToolCall } from "./tool-runtime";
 import { executeTool } from "./tool-runtime";
 import { StreamLifecycle, createId, createTextChunk, createRecoveringChunk, createRecoveryFallbackChunk } from "@/lib/ai/stream";
 import type { StreamWriter } from "@/lib/ai/stream";
+import { withTimeout } from "@/lib/ai/debug/timeout-detector";
+import { resolveCapabilityContextInvocations } from "@/lib/capability/context";
 
 const MAX_TOOL_CALLS = 5;
 const MAX_RETRY_ATTEMPTS = 3;
@@ -30,6 +32,7 @@ export async function orchestrateChat(
   while (recoveryAttempts <= MAX_RETRY_ATTEMPTS) {
     try {
       await doOrchestrateChat(session, writer, context, lifecycle, recoveryAttempts);
+      lifecycle.close();
       return;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "未知错误";
@@ -66,6 +69,25 @@ async function doOrchestrateChat(
   const model = session.getModel();
   const skill = skillRegistry.get(session.getSkillId());
   const resultPolicy = skill?.getResultPolicy() || "auto";
+  const skillDefinition = skill?.toCapabilityDefinition();
+
+  const userGoal = currentMessages[currentMessages.length - 1]?.content as string || "";
+  const remoteCapabilityInvocations = skillDefinition 
+    ? resolveCapabilityContextInvocations(userGoal, skillDefinition)
+    : [];
+
+  for (const invocation of remoteCapabilityInvocations) {
+    lifecycle.writeChunk(createTextChunk(`🔍 调用远程能力: ${invocation.name}`));
+    try {
+      const capabilityResult = await invocation.execute({ writer, lifecycle });
+      if (capabilityResult.success && capabilityResult.content) {
+        lifecycle.writeChunk(createTextChunk(`📊 远程能力结果: ${capabilityResult.content}`));
+        currentMessages.push(new HumanMessage(`远程能力 [${invocation.name}] 结果: ${capabilityResult.content}`));
+      }
+    } catch (capabilityErr) {
+      lifecycle.writeChunk(createTextChunk(`⚠️ 远程能力 ${invocation.name} 调用失败`));
+    }
+  }
 
   const prompt = ChatPromptTemplate.fromMessages([
     ["system", session.getSystemPrompt()],
@@ -80,7 +102,7 @@ async function doOrchestrateChat(
   const toolResults: Array<{ toolName: string; result: string; isAuthoritative: boolean }> = [];
 
   while (toolCallCount < MAX_TOOL_CALLS) {
-    const result = await chain.invoke({ messages: currentMessages });
+    const result = await withTimeout('LLM chain.invoke', chain.invoke({ messages: currentMessages }), { timeoutMs: 60000 });
     const toolCalls = parseToolCalls(result);
 
     if (toolCalls.length === 0) {
@@ -99,7 +121,7 @@ async function doOrchestrateChat(
 
     let roundFailed = true;
     for (const tc of toolCalls) {
-      const executionResult = await executeToolWithRetry(tc, { clientIP: context.clientIP }, lifecycle);
+      const executionResult = await withTimeout(`executeToolWithRetry ${tc.name}`, executeToolWithRetry(tc, { clientIP: context.clientIP }, lifecycle), { timeoutMs: 45000 });
 
       executionResult.chunks.forEach(chunk => lifecycle.writeChunk(chunk));
       executionResult.messages.forEach(msg => currentMessages.push(msg));

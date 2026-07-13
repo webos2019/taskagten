@@ -115,8 +115,9 @@ export function useChatStream(): ChatHookReturn {
         const decoder = new TextDecoder();
         const blocks: StructuredBlock[] = [];
         let buffer = "";
+        let isStreamDone = false;
 
-        while (true) {
+        while (!isStreamDone) {
           const { done, value } = await reader.read();
           if (done) break;
 
@@ -240,6 +241,7 @@ export function useChatStream(): ChatHookReturn {
                 }
 
                 case "done":
+                  isStreamDone = true;
                   break;
               }
             } catch (parseErr) {
@@ -247,7 +249,11 @@ export function useChatStream(): ChatHookReturn {
                 throw parseErr;
               }
             }
+            
+            if (isStreamDone) break;
           }
+          
+          if (isStreamDone) break;
         }
 
         const assistantMessage: ChatMessage = {

@@ -32,6 +32,7 @@ export function createNDJSONStream(
       const writer = new NDJSONWebWriter(controller);
       try {
         await onStart(writer);
+        writer.close();
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "未知错误";
         writer.writeChunk({ type: "error", error: errorMessage });

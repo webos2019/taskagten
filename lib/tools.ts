@@ -527,6 +527,15 @@ skillRegistry.register({
   resultPolicy: "summary-first",
   routingHints: ["file", "read", "directory", "weather", "location", "city", "文件", "天气", "目录", "读取"],
   tags: ["file", "weather", "location"],
+  capabilitySelectors: [
+    { providerKind: "mcp", location: "local", capabilityType: "tool", names: ["get_weather"] },
+    { providerKind: "mcp", location: "local", capabilityType: "resource", names: ["local-text-read"] },
+    { providerKind: "mcp", location: "local", capabilityType: "prompt", names: ["local-file-summary"] },
+    { providerKind: "mcp", location: "remote", serverId: "project-assistant-service", capabilityType: "resource" },
+    { providerKind: "mcp", location: "remote", serverId: "project-assistant-service", capabilityType: "prompt" },
+    { providerKind: "mcp", location: "remote", serverId: "project-assistant-service", capabilityType: "tool" },
+  ],
+  fallbackPolicy: "direct-answer",
 });
 
 export { toolRegistry, skillRegistry };

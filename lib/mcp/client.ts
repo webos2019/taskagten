@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { MCP_CLIENT_INFO, MCP_CLIENT_CAPABILITIES } from './types';
+import { withTimeout } from '@/lib/ai/debug/timeout-detector';
 
 export interface MCPClientConfig {
   serverId: string;
@@ -41,7 +42,7 @@ export class MCPClient {
 
       console.log(`[DEBUG-MCP] [${this.config.serverId}] Client created, connecting...`);
 
-      await this.client.connect(this.transport);
+      await withTimeout(`MCP connect [${this.config.serverId}]`, this.client.connect(this.transport), { timeoutMs: 15000 });
       this.isConnected = true;
       this.startTime = Date.now();
 
@@ -65,7 +66,7 @@ export class MCPClient {
 
     const start = Date.now();
     try {
-      const result = await this.client.callTool({ name: toolName, arguments: arguments_ });
+      const result = await withTimeout(`MCP callTool [${this.config.serverId}].${toolName}`, this.client.callTool({ name: toolName, arguments: arguments_ }), { timeoutMs: 30000 });
       const elapsed = Date.now() - start;
       console.log(`[DEBUG-MCP] [${this.config.serverId}] Tool call completed! Elapsed: ${elapsed}ms`);
       console.log(`[DEBUG-MCP] [${this.config.serverId}] Result type: ${result.type}`);
