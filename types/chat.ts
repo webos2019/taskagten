@@ -28,7 +28,7 @@ export interface ChatMessage {
   files?: FileInfo[];
 }
 
-export type StreamStatus = "idle" | "loading" | "streaming" | "error";
+export type StreamStatus = "idle" | "loading" | "streaming" | "retrying" | "error";
 
 export type StreamChunkType =
   | "start"

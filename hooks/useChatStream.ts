@@ -216,8 +216,28 @@ export function useChatStream(): ChatHookReturn {
                   break;
                 }
 
-                case "error":
-                  throw new Error(chunk.error || "服务端错误");
+                case "error": {
+                  const errorText = chunk.error || "服务端错误";
+                  blocks.push({ type: "text", content: `⚠️ 错误：${errorText}` });
+                  setStreamingBlocks([...blocks]);
+                  
+                  if (chunk.retryable !== false) {
+                    setStatus("retrying");
+                  }
+                  break;
+                }
+
+                case "recovering": {
+                  blocks.push({ type: "text", content: `🔄 ${chunk.message}` });
+                  setStreamingBlocks([...blocks]);
+                  break;
+                }
+
+                case "recovery_fallback": {
+                  blocks.push({ type: "text", content: `📌 ${chunk.message}（${chunk.fallbackMethod}）` });
+                  setStreamingBlocks([...blocks]);
+                  break;
+                }
 
                 case "done":
                   break;

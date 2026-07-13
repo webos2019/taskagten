@@ -4,6 +4,7 @@ import { orchestrateChat } from "./runtime/chat-orchestrator";
 import { createNDJSONStream } from "./stream";
 import type { StreamWriter } from "./stream";
 import type { SkillId } from "@/lib/langchain";
+import "@/lib/tools";
 
 export interface ChatRequest {
   messages: Array<{ role: string; content: string; files?: { name: string; type: string; content: string }[] }>;

@@ -19,15 +19,25 @@ export async function weatherToolAdapter(input: WeatherToolAdapterInput): Promis
   title: string;
   toolName: string;
 }> {
+  console.log(`[DEBUG-MCP-ADAPTER] weatherToolAdapter called with city: ${input.city}`);
+  
+  const start = Date.now();
   const response = await mcpClientManager.callTool(WEATHER_SERVER_ID, WEATHER_TOOL_NAME, { city: input.city });
+  
+  const elapsed = Date.now() - start;
+  console.log(`[DEBUG-MCP-ADAPTER] weatherToolAdapter completed in ${elapsed}ms`);
+  console.log(`[DEBUG-MCP-ADAPTER] Response isError: ${response.isError}`);
 
   const contentArray = response.content as Array<{ type: string; text?: string }>;
   const textContent = contentArray?.find(c => c.type === 'text')?.text || JSON.stringify(response, null, 2);
 
   if (response.isError) {
+    console.error(`[DEBUG-MCP-ADAPTER] weatherToolAdapter error: ${textContent}`);
     throw new MCPHostError('REQUEST_FAILED', textContent || '天气 MCP Tool 调用失败。');
   }
 
+  console.log(`[DEBUG-MCP-ADAPTER] weatherToolAdapter result: ${textContent.slice(0, 50)}...`);
+  
   return {
     action: 'current',
     inputText: `city=${input.city}`,

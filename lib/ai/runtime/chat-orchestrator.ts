@@ -5,10 +5,12 @@ import { skillRegistry } from "@/lib/skill-registry";
 import type { ChatSession } from "./chat-session";
 import type { ToolCall } from "./tool-runtime";
 import { executeTool } from "./tool-runtime";
-import { StreamLifecycle, createId, createTextChunk } from "@/lib/ai/stream";
+import { StreamLifecycle, createId, createTextChunk, createRecoveringChunk, createRecoveryFallbackChunk } from "@/lib/ai/stream";
 import type { StreamWriter } from "@/lib/ai/stream";
 
 const MAX_TOOL_CALLS = 5;
+const MAX_RETRY_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 2000;
 
 export interface OrchestratorContext {
   clientIP?: string;
@@ -23,81 +25,107 @@ export async function orchestrateChat(
   const messageId = createId();
   lifecycle.emitStartOnce(messageId);
 
-  try {
-    let currentMessages = [...session.getMessages()];
-    const model = session.getModel();
-    const skill = skillRegistry.get(session.getSkillId());
-    const resultPolicy = skill?.getResultPolicy() || "auto";
+  let recoveryAttempts = 0;
 
-    const prompt = ChatPromptTemplate.fromMessages([
-      ["system", session.getSystemPrompt()],
-      new MessagesPlaceholder("messages"),
-    ]);
-
-    const chain = prompt.pipe(model);
-
-    let toolCallCount = 0;
-    let hasToolCalls = false;
-    let allToolCallsFailed = false;
-    let hasAuthoritativeResult = false;
-    const toolResults: Array<{ toolName: string; result: string; isAuthoritative: boolean }> = [];
-    const failedToolCalls: Array<{ toolName: string; error: string }> = [];
-
-    while (toolCallCount < MAX_TOOL_CALLS) {
-      const result = await chain.invoke({ messages: currentMessages });
-      const toolCalls = parseToolCalls(result);
-
-      if (toolCalls.length === 0) {
-        if (!hasToolCalls) {
-          const content = result.content;
-          if (content) {
-            const text = typeof content === "string" ? content : JSON.stringify(content);
-            lifecycle.writeChunk(createTextChunk(text));
-          }
-        }
-        break;
-      }
-
-      hasToolCalls = true;
-      currentMessages.push(result);
-
-      let roundFailed = true;
-      for (const tc of toolCalls) {
-        const executionResult = await executeTool(tc, { clientIP: context.clientIP });
-
-        executionResult.chunks.forEach(chunk => lifecycle.writeChunk(chunk));
-        executionResult.messages.forEach(msg => currentMessages.push(msg));
-        executionResult.toolResults.forEach(tr => toolResults.push(tr));
-        executionResult.failedToolCalls.forEach(f => failedToolCalls.push(f));
-
-        if (executionResult.hasAuthoritativeResult) {
-          hasAuthoritativeResult = true;
-        }
-        if (!executionResult.roundFailed) {
-          roundFailed = false;
-        }
-
-        toolCallCount++;
-      }
-
-      if (roundFailed) {
-        allToolCallsFailed = true;
-        break;
-      }
-
-      if (toolCallCount >= MAX_TOOL_CALLS) {
-        break;
-      }
-    }
-
-    if (allToolCallsFailed) {
-      const errorText = `工具调用失败，请检查参数格式是否正确：\n${failedToolCalls.map(f => `- ${f.toolName}: ${f.error}`).join("\n")}`;
-      lifecycle.emitErrorOnce(errorText);
-      lifecycle.close();
+  while (recoveryAttempts <= MAX_RETRY_ATTEMPTS) {
+    try {
+      await doOrchestrateChat(session, writer, context, lifecycle, recoveryAttempts);
       return;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "未知错误";
+      
+      if (recoveryAttempts < MAX_RETRY_ATTEMPTS) {
+        recoveryAttempts++;
+        lifecycle.writeChunk(createRecoveringChunk(`服务遇到问题，正在尝试恢复... (${recoveryAttempts}/${MAX_RETRY_ATTEMPTS})`, recoveryAttempts, MAX_RETRY_ATTEMPTS));
+        
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * recoveryAttempts));
+      } else {
+        lifecycle.writeChunk(createRecoveryFallbackChunk(`多次尝试恢复失败，将尝试直接回答`, "direct-answer"));
+        
+        try {
+          await fallbackToDirectAnswer(session, writer, context, lifecycle);
+        } catch (fallbackErr) {
+          lifecycle.emitErrorOnce(fallbackErr instanceof Error ? fallbackErr.message : "服务不可用");
+        }
+        
+        lifecycle.close();
+        return;
+      }
+    }
+  }
+}
+
+async function doOrchestrateChat(
+  session: ChatSession,
+  writer: StreamWriter,
+  context: OrchestratorContext,
+  lifecycle: StreamLifecycle,
+  attempt: number
+): Promise<void> {
+  let currentMessages = [...session.getMessages()];
+  const model = session.getModel();
+  const skill = skillRegistry.get(session.getSkillId());
+  const resultPolicy = skill?.getResultPolicy() || "auto";
+
+  const prompt = ChatPromptTemplate.fromMessages([
+    ["system", session.getSystemPrompt()],
+    new MessagesPlaceholder("messages"),
+  ]);
+
+  const chain = prompt.pipe(model);
+
+  let toolCallCount = 0;
+  let hasToolCalls = false;
+  let hasAuthoritativeResult = false;
+  const toolResults: Array<{ toolName: string; result: string; isAuthoritative: boolean }> = [];
+
+  while (toolCallCount < MAX_TOOL_CALLS) {
+    const result = await chain.invoke({ messages: currentMessages });
+    const toolCalls = parseToolCalls(result);
+
+    if (toolCalls.length === 0) {
+      if (!hasToolCalls) {
+        const content = result.content;
+        if (content) {
+          const text = typeof content === "string" ? content : JSON.stringify(content);
+          lifecycle.writeChunk(createTextChunk(text));
+        }
+      }
+      break;
     }
 
-    if (hasToolCalls) {
+    hasToolCalls = true;
+    currentMessages.push(result);
+
+    let roundFailed = true;
+    for (const tc of toolCalls) {
+      const executionResult = await executeToolWithRetry(tc, { clientIP: context.clientIP }, lifecycle);
+
+      executionResult.chunks.forEach(chunk => lifecycle.writeChunk(chunk));
+      executionResult.messages.forEach(msg => currentMessages.push(msg));
+      executionResult.toolResults.forEach(tr => toolResults.push(tr));
+
+      if (executionResult.hasAuthoritativeResult) {
+        hasAuthoritativeResult = true;
+      }
+      if (!executionResult.roundFailed) {
+        roundFailed = false;
+      }
+
+      toolCallCount++;
+    }
+
+    if (roundFailed) {
+      break;
+    }
+
+    if (toolCallCount >= MAX_TOOL_CALLS) {
+      break;
+    }
+  }
+
+  if (hasToolCalls) {
+    if (toolResults.length > 0) {
       if (resultPolicy === "tool-first" && hasAuthoritativeResult) {
         const authoritativeResults = toolResults.filter(r => r.isAuthoritative);
         for (const tr of authoritativeResults) {
@@ -105,37 +133,92 @@ export async function orchestrateChat(
           lifecycle.writeChunk(createTextChunk(formattedText));
         }
       } else {
-        const fallbackModel = getDeepSeekModel();
-        const fallbackPrompt = ChatPromptTemplate.fromMessages([
-          ["system", session.getSystemPrompt()],
-          new MessagesPlaceholder("messages"),
-        ]);
-        const summaryChain = fallbackPrompt.pipe(fallbackModel);
-
-        const toolResultMessages = currentMessages.filter(m => m._getType() === "tool");
-        const toolResultText = toolResultMessages.map(m => (m as any).content).join("\n\n");
-
-        const summaryMessages: BaseMessage[] = [
-          new SystemMessage(session.getSystemPrompt()),
-          new HumanMessage(`用户问：${currentMessages[currentMessages.length - 1].content}\n\n工具调用结果：\n${toolResultText}\n\n请根据工具结果用自然语言总结回答用户。`),
-        ];
-
-        const finalResult = await summaryChain.invoke({ messages: summaryMessages });
-        const finalContent = finalResult.content;
-
-        if (finalContent) {
-          const text = typeof finalContent === "string" ? finalContent : JSON.stringify(finalContent);
-          lifecycle.writeChunk(createTextChunk(text));
-        }
+        await generateSummaryAnswer(session, currentMessages, lifecycle);
       }
+    } else {
+      lifecycle.writeChunk(createTextChunk("抱歉，工具调用失败，请稍后重试。"));
     }
+  }
 
-    lifecycle.emitDoneOnce();
-    lifecycle.close();
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : "未知错误";
-    lifecycle.emitErrorOnce(errorMessage);
-    lifecycle.close();
+  lifecycle.emitDoneOnce();
+}
+
+async function executeToolWithRetry(
+  toolCall: ToolCall,
+  context: OrchestratorContext,
+  lifecycle: StreamLifecycle
+) {
+  let attempts = 0;
+  
+  while (attempts < 2) {
+    const executionResult = await executeTool(toolCall, context);
+    
+    if (!executionResult.roundFailed) {
+      return executionResult;
+    }
+    
+    attempts++;
+    if (attempts < 2) {
+      lifecycle.writeChunk(createRecoveringChunk(`工具 ${toolCall.name} 调用失败，正在重试...`, attempts, 2));
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+  
+  return executionResult;
+}
+
+async function fallbackToDirectAnswer(
+  session: ChatSession,
+  writer: StreamWriter,
+  context: OrchestratorContext,
+  lifecycle: StreamLifecycle
+): Promise<void> {
+  const messages = [...session.getMessages()];
+  const model = session.getModel();
+  
+  const prompt = ChatPromptTemplate.fromMessages([
+    ["system", session.getSystemPrompt()],
+    new MessagesPlaceholder("messages"),
+  ]);
+
+  const chain = prompt.pipe(model);
+  const result = await chain.invoke({ messages });
+  
+  const content = result.content;
+  if (content) {
+    const text = typeof content === "string" ? content : JSON.stringify(content);
+    lifecycle.writeChunk(createTextChunk(text));
+  }
+  
+  lifecycle.emitDoneOnce();
+}
+
+async function generateSummaryAnswer(
+  session: ChatSession,
+  currentMessages: BaseMessage[],
+  lifecycle: StreamLifecycle
+): Promise<void> {
+  const fallbackModel = getDeepSeekModel();
+  const fallbackPrompt = ChatPromptTemplate.fromMessages([
+    ["system", session.getSystemPrompt()],
+    new MessagesPlaceholder("messages"),
+  ]);
+  const summaryChain = fallbackPrompt.pipe(fallbackModel);
+
+  const toolResultMessages = currentMessages.filter(m => m._getType() === "tool");
+  const toolResultText = toolResultMessages.map(m => (m as any).content).join("\n\n");
+
+  const summaryMessages: BaseMessage[] = [
+    new SystemMessage(session.getSystemPrompt()),
+    new HumanMessage(`用户问：${currentMessages[currentMessages.length - 1].content}\n\n工具调用结果：\n${toolResultText}\n\n请根据工具结果用自然语言总结回答用户。`),
+  ];
+
+  const finalResult = await summaryChain.invoke({ messages: summaryMessages });
+  const finalContent = finalResult.content;
+
+  if (finalContent) {
+    const text = typeof finalContent === "string" ? finalContent : JSON.stringify(finalContent);
+    lifecycle.writeChunk(createTextChunk(text));
   }
 }
 

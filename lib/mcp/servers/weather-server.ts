@@ -15,17 +15,31 @@ server.registerTool('get_weather', {
 }, async (args) => {
   const city = (args as { city: string }).city;
   
+  console.log(`[DEBUG-WEATHER-SERVER] Received get_weather request for city: ${city}`);
+  
+  const start = Date.now();
   try {
+    console.log(`[DEBUG-WEATHER-SERVER] Fetching weather from wttr.in...`);
     const response = await fetch(`https://wttr.in/${encodeURIComponent(city)}?format=j1`);
+    
+    const fetchElapsed = Date.now() - start;
+    console.log(`[DEBUG-WEATHER-SERVER] Fetch completed in ${fetchElapsed}ms, status: ${response.status}`);
+    
     if (!response.ok) {
+      console.error(`[DEBUG-WEATHER-SERVER] HTTP error: ${response.status}`);
       throw new Error(`HTTP ${response.status}`);
     }
+    
+    console.log(`[DEBUG-WEATHER-SERVER] Parsing JSON response...`);
     const data = await response.json();
+    
+    console.log(`[DEBUG-WEATHER-SERVER] Response received, current_condition: ${data.current_condition ? 'exists' : 'null'}`);
     
     const current = data.current_condition?.[0];
     const forecast = data.weather?.[0];
     
     if (!current) {
+      console.error(`[DEBUG-WEATHER-SERVER] No current weather data for ${city}`);
       return {
         type: 'tool_result',
         content: [
@@ -40,6 +54,10 @@ server.registerTool('get_weather', {
     
     const weatherText = `${city}今天天气为 ${current.weatherDesc?.[0]?.value || '未知'}，气温 ${current.temp_C}°C，体感温度 ${current.FeelsLikeC}°C。${current.humidity ? `湿度 ${current.humidity}%，` : ''}${current.windspeedKmph ? `风速 ${current.windspeedKmph}公里/小时。` : ''}${forecast?.maxtempC ? `最高气温${forecast.maxtempC}°C，` : ''}${forecast?.mintempC ? `最低气温${forecast.mintempC}°C。` : ''}`;
     
+    const totalElapsed = Date.now() - start;
+    console.log(`[DEBUG-WEATHER-SERVER] Weather query successful! Total elapsed: ${totalElapsed}ms`);
+    console.log(`[DEBUG-WEATHER-SERVER] Result: ${weatherText.slice(0, 50)}...`);
+    
     return {
       type: 'tool_result',
       content: [
@@ -51,6 +69,10 @@ server.registerTool('get_weather', {
       isError: false,
     };
   } catch (error) {
+    const elapsed = Date.now() - start;
+    console.error(`[DEBUG-WEATHER-SERVER] Weather query failed! Elapsed: ${elapsed}ms`);
+    console.error(`[DEBUG-WEATHER-SERVER] Error:`, error);
+    
     return {
       type: 'tool_result',
       content: [

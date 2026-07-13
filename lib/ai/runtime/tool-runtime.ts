@@ -7,16 +7,18 @@ import { ChatStreamChunk, createToolCallChunk, createToolResultChunk, createReso
 const WEATHER_SERVER_ID = 'weather-server';
 const PROJECT_FILES_SERVER_ID = 'project-files-server';
 
+const tsxPath = require('path').resolve(process.cwd(), 'node_modules/tsx/dist/cli.mjs');
+
 mcpClientManager.register(WEATHER_SERVER_ID, {
   serverId: WEATHER_SERVER_ID,
-  command: 'npx',
-  args: ['tsx', 'lib/mcp/servers/weather-server.ts'],
+  command: process.execPath,
+  args: [tsxPath, require('path').resolve(process.cwd(), 'lib/mcp/servers/weather-server.ts')],
 });
 
 mcpClientManager.register(PROJECT_FILES_SERVER_ID, {
   serverId: PROJECT_FILES_SERVER_ID,
-  command: 'npx',
-  args: ['tsx', 'lib/mcp/servers/project-files-server.ts'],
+  command: process.execPath,
+  args: [tsxPath, require('path').resolve(process.cwd(), 'lib/mcp/servers/project-files-server.ts')],
 });
 
 export interface ToolCall {
@@ -95,9 +97,14 @@ export async function executeTool(
     }
   } else if (toolName === "get_weather") {
     chunks.push(createToolCallChunk(toolCallId, toolName, args, { serverId: WEATHER_SERVER_ID, source: 'mcp' }));
+    console.log(`[DEBUG-TOOL-RUNTIME] get_weather called with city: ${args.city}`);
 
     try {
+      const start = Date.now();
       const mcpResult = await weatherToolAdapter({ city: String(args.city || "") });
+      const elapsed = Date.now() - start;
+      console.log(`[DEBUG-TOOL-RUNTIME] weatherToolAdapter completed in ${elapsed}ms`);
+      
       const weatherResult = JSON.stringify({
         message: mcpResult.outputText,
         city: String(args.city || ""),
@@ -119,8 +126,11 @@ export async function executeTool(
         tool_call_id: toolCallId,
       }));
       roundFailed = false;
+      console.log(`[DEBUG-TOOL-RUNTIME] get_weather successful, roundFailed: false`);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "天气查询失败";
+      console.error(`[DEBUG-TOOL-RUNTIME] get_weather failed: ${errorMsg}`);
+      
       chunks.push(createToolResultChunk(toolCallId, toolName, JSON.stringify({ error: errorMsg }), {
         isValid: false,
         serverId: WEATHER_SERVER_ID,

@@ -8,6 +8,8 @@ export type StreamChunkType =
   | "resource_end"
   | "resource_error"
   | "error"
+  | "recovering"
+  | "recovery_fallback"
   | "done";
 
 export interface StreamChunkBase {
@@ -77,6 +79,21 @@ export interface ResourceErrorChunk extends StreamChunkBase {
 export interface ErrorChunk extends StreamChunkBase {
   type: "error";
   error: string;
+  retryable?: boolean;
+  retryDelay?: number;
+}
+
+export interface RecoveringChunk extends StreamChunkBase {
+  type: "recovering";
+  message: string;
+  attempt: number;
+  maxAttempts: number;
+}
+
+export interface RecoveryFallbackChunk extends StreamChunkBase {
+  type: "recovery_fallback";
+  message: string;
+  fallbackMethod: string;
 }
 
 export interface DoneChunk extends StreamChunkBase {
@@ -93,6 +110,8 @@ export type ChatStreamChunk =
   | ResourceEndChunk
   | ResourceErrorChunk
   | ErrorChunk
+  | RecoveringChunk
+  | RecoveryFallbackChunk
   | DoneChunk;
 
 export function createStartChunk(messageId: string): StartChunk {
@@ -150,8 +169,16 @@ export function createResourceErrorChunk(
   return { type: "resource_error", resourceName, resourceUri, error, ...options };
 }
 
-export function createErrorChunk(error: string): ErrorChunk {
-  return { type: "error", error };
+export function createErrorChunk(error: string, options?: { retryable?: boolean; retryDelay?: number }): ErrorChunk {
+  return { type: "error", error, ...options };
+}
+
+export function createRecoveringChunk(message: string, attempt: number, maxAttempts: number): RecoveringChunk {
+  return { type: "recovering", message, attempt, maxAttempts };
+}
+
+export function createRecoveryFallbackChunk(message: string, fallbackMethod: string): RecoveryFallbackChunk {
+  return { type: "recovery_fallback", message, fallbackMethod };
 }
 
 export function createDoneChunk(): DoneChunk {
