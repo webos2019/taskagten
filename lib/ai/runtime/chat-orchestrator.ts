@@ -2,6 +2,7 @@ import { AIMessage, HumanMessage, SystemMessage, ToolMessage, type BaseMessage }
 import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
 import { getDeepSeekModel } from "@/lib/deepseek";
 import { skillRegistry } from "@/lib/skill-registry";
+import type { SkillDefinition, CapabilityType, CapabilityExecutionResult } from "@/lib/capability/types";
 import type { ChatSession } from "./chat-session";
 import type { ToolCall } from "./tool-runtime";
 import { executeTool } from "./tool-runtime";
@@ -20,6 +21,17 @@ const RETRY_DELAY_MS = 2000;
 export interface OrchestratorContext {
   clientIP?: string;
 }
+
+interface CapabilityInvocation {
+  capabilityType: CapabilityType;
+  capabilityId: string;
+  name: string;
+  serverId?: string;
+  input: string;
+  execute: (options?: { writer?: unknown; lifecycle?: unknown }) => Promise<CapabilityExecutionResult>;
+}
+
+type CapabilityResolver = (userGoal: string, skillDefinition: SkillDefinition, executedToolResults?: ExecutedToolResult[]) => CapabilityInvocation[];
 
 export async function orchestrateChat(
   session: ChatSession,
@@ -80,7 +92,14 @@ async function doOrchestrateChat(
   console.log(`[Chat Orchestrator] 当前 Skill: ${skill?.meta.id || 'default'}, 用户目标: ${userGoal.substring(0, 50)}...`);
   console.log(`[Chat Orchestrator] Result Policy: ${resultPolicy}, Output Policy: ${outputPolicy}`);
 
-  await consumeRemoteCapabilityContext(userGoal, skillDefinition, currentMessages, lifecycle);
+  await consumeCapabilityContext(
+    userGoal,
+    skillDefinition,
+    currentMessages,
+    lifecycle,
+    "远程",
+    resolveCapabilityContextInvocations
+  );
 
   const prompt = ChatPromptTemplate.fromMessages([
     ["system", session.getSystemPrompt()],
@@ -90,10 +109,10 @@ async function doOrchestrateChat(
   const chain = prompt.pipe(model);
 
   let toolCallCount = 0;
-    let hasToolCalls = false;
-    let hasAuthoritativeResult = false;
-    const toolResults: Array<{ toolName: string; result: string; isAuthoritative: boolean }> = [];
-    const executedToolResults: ExecutedToolResult[] = [];
+  let hasToolCalls = false;
+  let hasAuthoritativeResult = false;
+  const toolResults: Array<{ toolName: string; result: string; isAuthoritative: boolean }> = [];
+  const executedToolResults: ExecutedToolResult[] = [];
 
   while (toolCallCount < MAX_TOOL_CALLS) {
     const result = await withTimeout('LLM chain.invoke', chain.invoke({ messages: currentMessages }), { timeoutMs: 60000 });
@@ -162,7 +181,15 @@ async function doOrchestrateChat(
     }
   }
 
-  await consumeLocalCapabilityContext(userGoal, skillDefinition, executedToolResults, lifecycle);
+  await consumeCapabilityContext(
+    userGoal,
+    skillDefinition,
+    currentMessages,
+    lifecycle,
+    "本地",
+    resolveLocalCapabilityContextInvocations,
+    executedToolResults
+  );
 
   if (hasToolCalls) {
     if (toolResults.length > 0) {
@@ -183,83 +210,49 @@ async function doOrchestrateChat(
   lifecycle.emitDoneOnce();
 }
 
-async function consumeRemoteCapabilityContext(
+async function consumeCapabilityContext(
   userGoal: string,
-  skillDefinition: any,
+  skillDefinition: SkillDefinition | undefined,
   currentMessages: BaseMessage[],
-  lifecycle: StreamLifecycle
+  lifecycle: StreamLifecycle,
+  capabilityType: string,
+  resolver: CapabilityResolver,
+  executedToolResults?: ExecutedToolResult[]
 ): Promise<void> {
-  const remoteCapabilityInvocations = skillDefinition 
-    ? resolveCapabilityContextInvocations(userGoal, skillDefinition)
+  const capabilityInvocations = skillDefinition 
+    ? resolver(userGoal, skillDefinition, executedToolResults)
     : [];
 
-  console.log(`[Chat Orchestrator] 发现 ${remoteCapabilityInvocations.length} 个远程能力调用`);
+  console.log(`[Chat Orchestrator] 发现 ${capabilityInvocations.length} 个${capabilityType}能力调用`);
 
-  for (const invocation of remoteCapabilityInvocations) {
+  for (const invocation of capabilityInvocations) {
     const capabilityDef = capabilityRegistry.get(invocation.capabilityId);
     
     if (capabilityDef) {
-      console.log(`[Chat Orchestrator] 能力 ${invocation.name} 状态: ${capabilityDef.availability}`);
+      console.log(`[Chat Orchestrator] ${capabilityType}能力 ${invocation.name} 状态: ${capabilityDef.availability}`);
       
       if (capabilityDef.availability !== 'available') {
-        lifecycle.writeChunk(createTextChunk(`⚠️ 能力 ${invocation.name} 当前不可用 (${capabilityDef.availability})`));
+        lifecycle.writeChunk(createTextChunk(`⚠️ ${capabilityType}能力 ${invocation.name} 当前不可用 (${capabilityDef.availability})`));
         continue;
       }
     }
     
-    lifecycle.writeChunk(createTextChunk(`🔍 调用远程能力: ${invocation.name}`));
+    lifecycle.writeChunk(createTextChunk(`🔍 调用${capabilityType}能力: ${invocation.name}`));
     
     try {
       const capabilityResult = await invocation.execute({ writer: null, lifecycle });
-      console.log(`[Chat Orchestrator] 远程能力 ${invocation.name} 执行结果: ${capabilityResult.success ? '成功' : '失败'}`);
+      console.log(`[Chat Orchestrator] ${capabilityType}能力 ${invocation.name} 执行结果: ${capabilityResult.success ? '成功' : '失败'}`);
       
       if (capabilityResult.success && capabilityResult.content) {
-        lifecycle.writeChunk(createTextChunk(`📊 远程能力结果: ${capabilityResult.content}`));
-        currentMessages.push(new HumanMessage(`远程能力 [${invocation.name}] 结果: ${capabilityResult.content}`));
+        lifecycle.writeChunk(createTextChunk(`📊 ${capabilityType}能力结果: ${capabilityResult.content}`));
+        
+        if (capabilityType === "远程") {
+          currentMessages.push(new HumanMessage(`${capabilityType}能力 [${invocation.name}] 结果: ${capabilityResult.content}`));
+        }
       }
     } catch (capabilityErr) {
-      console.error(`[Chat Orchestrator] 远程能力 ${invocation.name} 调用失败:`, capabilityErr);
-      lifecycle.writeChunk(createTextChunk(`⚠️ 远程能力 ${invocation.name} 调用失败`));
-    }
-  }
-}
-
-async function consumeLocalCapabilityContext(
-  userGoal: string,
-  skillDefinition: any,
-  executedToolResults: ExecutedToolResult[],
-  lifecycle: StreamLifecycle
-): Promise<void> {
-  const localCapabilityInvocations = skillDefinition 
-    ? resolveLocalCapabilityContextInvocations(userGoal, skillDefinition, executedToolResults)
-    : [];
-
-  console.log(`[Chat Orchestrator] 发现 ${localCapabilityInvocations.length} 个本地能力调用`);
-
-  for (const invocation of localCapabilityInvocations) {
-    const capabilityDef = capabilityRegistry.get(invocation.capabilityId);
-    
-    if (capabilityDef) {
-      console.log(`[Chat Orchestrator] 本地能力 ${invocation.name} 状态: ${capabilityDef.availability}`);
-      
-      if (capabilityDef.availability !== 'available') {
-        lifecycle.writeChunk(createTextChunk(`⚠️ 本地能力 ${invocation.name} 当前不可用 (${capabilityDef.availability})`));
-        continue;
-      }
-    }
-    
-    lifecycle.writeChunk(createTextChunk(`🔍 调用本地能力: ${invocation.name}`));
-    
-    try {
-      const capabilityResult = await invocation.execute({ writer: null, lifecycle });
-      console.log(`[Chat Orchestrator] 本地能力 ${invocation.name} 执行结果: ${capabilityResult.success ? '成功' : '失败'}`);
-      
-      if (capabilityResult.success && capabilityResult.content) {
-        lifecycle.writeChunk(createTextChunk(`📊 本地能力结果: ${capabilityResult.content}`));
-      }
-    } catch (capabilityErr) {
-      console.error(`[Chat Orchestrator] 本地能力 ${invocation.name} 调用失败:`, capabilityErr);
-      lifecycle.writeChunk(createTextChunk(`⚠️ 本地能力 ${invocation.name} 调用失败`));
+      console.error(`[Chat Orchestrator] ${capabilityType}能力 ${invocation.name} 调用失败:`, capabilityErr);
+      lifecycle.writeChunk(createTextChunk(`⚠️ ${capabilityType}能力 ${invocation.name} 调用失败`));
     }
   }
 }
@@ -320,7 +313,7 @@ async function generateSummaryAnswer(
   lifecycle: StreamLifecycle,
   outputPolicy: string = "concise-utility"
 ): Promise<void> {
-  const fallbackModel = getDeepSeekModel();
+  const model = session.getModel();
   
   let outputInstruction = "";
   if (outputPolicy === "detailed-explanation") {
@@ -331,10 +324,10 @@ async function generateSummaryAnswer(
     ["system", session.getSystemPrompt()],
     new MessagesPlaceholder("messages"),
   ]);
-  const summaryChain = fallbackPrompt.pipe(fallbackModel);
+  const summaryChain = fallbackPrompt.pipe(model);
 
   const toolResultMessages = currentMessages.filter(m => m._getType() === "tool");
-  const toolResultText = toolResultMessages.map(m => (m as any).content).join("\n\n");
+  const toolResultText = toolResultMessages.map(m => (m as ToolMessage).content).join("\n\n");
 
   const summaryMessages: BaseMessage[] = [
     new SystemMessage(session.getSystemPrompt()),
@@ -350,10 +343,10 @@ async function generateSummaryAnswer(
   }
 }
 
-function parseToolCalls(result: any): ToolCall[] {
+function parseToolCalls(result: AIMessage): ToolCall[] {
   if (result.tool_calls && result.tool_calls.length > 0) {
-    return result.tool_calls.map((tc: any) => ({
-      id: tc.id,
+    return result.tool_calls.map((tc) => ({
+      id: tc.id ?? createId(),
       name: tc.name,
       args: tc.args || {},
     }));
@@ -364,7 +357,7 @@ function parseToolCalls(result: any): ToolCall[] {
         ? JSON.parse(tc.function.arguments)
         : (tc.function?.arguments || {});
       return {
-        id: tc.id,
+        id: tc.id ?? createId(),
         name: tc.function?.name || tc.name,
         args,
       };
