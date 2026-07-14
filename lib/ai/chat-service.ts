@@ -56,24 +56,21 @@ async function createChatStreamResult(
 
 function resolveSkill(explicitSkill: SkillId | undefined, userMessage: string): SkillId {
   if (explicitSkill) {
-    const readerKeywords = ["天气", "city", "weather", "location", "文件", "读取", "目录", "read", "file", "directory"];
-    const lowerMsg = userMessage.toLowerCase();
-    const needsReader = readerKeywords.some(keyword => lowerMsg.includes(keyword));
-    return needsReader ? "reader-skill" : explicitSkill;
+    // 保持显式指定的skill不变
+    return explicitSkill;
   }
 
-  const readerHints = ["文件", "读取", "目录", "天气", "city", "weather", "read", "file", "directory", "location"];
-  const utilityHints = ["计算", "时间", "日期", "换算", "convert", "datetime", "calculator", "math", "unit"];
+  // 自动检测技能，优先使用utility-skill处理天气
+  const utilityKeywords = ["计算", "时间", "日期", "换算", "convert", "datetime", "calculator", "math", "unit", "天气", "weather", "city"];
+  const readerKeywords = ["文件", "读取", "目录", "read", "file", "directory", "location"];
 
   const lowerMsg = userMessage.toLowerCase();
-  const readerMatches = readerHints.filter(hint => lowerMsg.includes(hint));
-  const utilityMatches = utilityHints.filter(hint => lowerMsg.includes(hint));
+  const utilityMatches = utilityKeywords.filter(keyword => lowerMsg.includes(keyword));
+  const readerMatches = readerKeywords.filter(keyword => lowerMsg.includes(keyword));
 
-  if (readerMatches.length > utilityMatches.length) {
+  // 优先使用utility-skill，除非明确匹配到文件操作
+  if (readerMatches.length > utilityMatches.length || readerMatches.length > 0) {
     return "reader-skill";
-  }
-  if (utilityMatches.length > readerMatches.length) {
-    return "utility-skill";
   }
 
   return "utility-skill";

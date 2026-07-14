@@ -1,9 +1,11 @@
 import { toolRegistry, type ChatToolDefinition } from "./tool-registry";
 import type { StructuredToolInterface } from "@langchain/core/tools";
-import type { SkillDefinition as CapabilitySkillDefinition, CapabilitySelector } from "./capability/types";
+import type { SkillDefinition as CapabilitySkillDefinition, CapabilitySelector, CapabilityIdentity, CapabilityType, CapabilityProviderKind, CapabilityLocation } from "./capability/types";
+import { createCapabilityId } from "./capability/registry";
 
 export type SkillOutputPolicy = "concise-utility" | "detailed-explanation" | "creative";
 export type SkillResultPolicy = "tool-first" | "summary-first" | "auto";
+export type SkillFallbackPolicy = "direct-answer" | "skip-capability" | "retry";
 
 export interface SkillMeta {
   id: string;
@@ -17,7 +19,8 @@ export interface SkillMeta {
   default?: boolean;
   tags?: string[];
   capabilitySelectors?: CapabilitySelector[];
-  fallbackPolicy?: "direct-answer" | "skip-capability" | "retry";
+  fallbackPolicy?: SkillFallbackPolicy;
+  sourceKinds?: CapabilityProviderKind[];
 }
 
 export interface RegisteredSkill {
@@ -29,8 +32,11 @@ export interface RegisteredSkill {
   getResultPolicy(): SkillResultPolicy;
   getRoutingHints(): string[];
   getCapabilitySelectors(): CapabilitySelector[];
-  getFallbackPolicy(): "direct-answer" | "skip-capability" | "retry";
+  getFallbackPolicy(): SkillFallbackPolicy;
+  getSourceKinds(): CapabilityProviderKind[];
   toCapabilityDefinition(): CapabilitySkillDefinition;
+  isCapabilityAllowed(identity: CapabilityIdentity): boolean;
+  listAllowedCapabilities(): CapabilitySelector[];
 }
 
 export class SkillRegistry {
@@ -74,6 +80,9 @@ export class SkillRegistry {
       getFallbackPolicy() {
         return meta.fallbackPolicy || "direct-answer";
       },
+      getSourceKinds() {
+        return meta.sourceKinds || [];
+      },
       toCapabilityDefinition(): CapabilitySkillDefinition {
         return {
           skillId: meta.id,
@@ -81,10 +90,38 @@ export class SkillRegistry {
           description: meta.description,
           systemPrompt: meta.systemPrompt,
           allowedTools: meta.toolNames,
-          sourceKinds: ["mcp"],
+          sourceKinds: meta.sourceKinds || ["internal", "mcp"],
           capabilitySelectors: meta.capabilitySelectors || [],
           fallbackPolicy: meta.fallbackPolicy || "direct-answer",
         };
+      },
+      isCapabilityAllowed(identity: CapabilityIdentity): boolean {
+        const capabilityId = createCapabilityId(identity);
+        const selectors = meta.capabilitySelectors || [];
+        
+        for (const selector of selectors) {
+          if (selector.providerKind && identity.providerKind !== selector.providerKind) {
+            continue;
+          }
+          if (selector.location && identity.location !== selector.location) {
+            continue;
+          }
+          if (selector.capabilityType && identity.capabilityType !== selector.capabilityType) {
+            continue;
+          }
+          if (selector.serverId && identity.serverId !== selector.serverId) {
+            continue;
+          }
+          if (selector.names && !selector.names.includes(identity.name)) {
+            continue;
+          }
+          return true;
+        }
+        
+        return false;
+      },
+      listAllowedCapabilities(): CapabilitySelector[] {
+        return meta.capabilitySelectors || [];
       },
     });
 

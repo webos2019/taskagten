@@ -1,7 +1,8 @@
 import { SystemMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages";
+import type { CapabilityExecutionResult, ExecutedToolResult } from "./types";
 
-const LOCAL_FILE_SUMMARY_PROMPT_NAME = 'local-file-summary';
-const LOCAL_FILE_SUMMARY_SERVER_ID = 'project-files-server';
+export const LOCAL_FILE_SUMMARY_PROMPT_NAME = 'local-file-summary';
+export const LOCAL_FILE_SUMMARY_SERVER_ID = 'project-files-server';
 
 export interface PromptContextInvocation {
   promptName: string;
@@ -9,17 +10,10 @@ export interface PromptContextInvocation {
   location: 'local' | 'remote';
   serverId?: string;
   input: string;
-  execute: () => BaseMessage[];
+  execute: () => Promise<{ messages: BaseMessage[]; result: CapabilityExecutionResult }>;
 }
 
-export interface ExecutedToolResult {
-  toolCall: {
-    name: string;
-    arguments: Record<string, unknown>;
-  };
-  result: string;
-  success: boolean;
-}
+
 
 function getLastUserMessageText(userInput: string): string {
   return userInput.trim();
@@ -87,6 +81,17 @@ export function resolvePromptContextInvocation(
     location: 'local',
     serverId: LOCAL_FILE_SUMMARY_SERVER_ID,
     input: formatPromptInvocationInput(filename, userGoal),
-    execute: () => buildLocalSummaryPromptContextMessages(filename, userGoal),
+    execute: async () => {
+      const messages = buildLocalSummaryPromptContextMessages(filename, userGoal);
+      return {
+        messages,
+        result: {
+          success: true,
+          content: `本地文件总结 Prompt [${LOCAL_FILE_SUMMARY_PROMPT_NAME}] 已注入`,
+          messageCount: messages.length,
+          metadata: { filename, userGoal },
+        },
+      };
+    },
   };
 }

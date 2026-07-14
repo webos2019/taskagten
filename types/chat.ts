@@ -40,7 +40,9 @@ export type StreamChunkType =
   | "resource_end"
   | "resource_error"
   | "done"
-  | "error";
+  | "error"
+  | "recovering"
+  | "recovery_fallback";
 
 export interface StreamChunk {
   type: StreamChunkType;
@@ -62,6 +64,12 @@ export interface StreamChunk {
   contentPreview?: string;
   isTruncated?: boolean;
   previewChars?: number;
+  retryable?: boolean;
+  retryDelay?: number;
+  message?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  fallbackMethod?: string;
 }
 
 export type SkillId = "utility-skill" | "reader-skill";

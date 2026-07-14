@@ -1,4 +1,6 @@
-import { AIMessage, HumanMessage, SystemMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
+import { AIMessage, HumanMessage, SystemMessage, ToolMessage, AIMessageChunk, type BaseMessage } from "@langchain/core/messages";
+import type { Runnable } from "@langchain/core/runnables";
+import type { BaseLanguageModelInput } from "@langchain/core/language_models/base";
 import { skillRegistry } from "@/lib/skill-registry";
 import { getDeepSeekModel } from "@/lib/deepseek";
 
@@ -11,7 +13,7 @@ export interface ChatSession {
   getMessages(): BaseMessage[];
   getSkillId(): string;
   getSystemPrompt(): string;
-  getModel(): ReturnType<typeof getDeepSeekModel>;
+  getModel(): ReturnType<typeof getDeepSeekModel> | Runnable<BaseLanguageModelInput, AIMessageChunk>;
 }
 
 export function createChatSession(config: ChatSessionConfig): ChatSession {

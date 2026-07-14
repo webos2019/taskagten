@@ -1,9 +1,11 @@
 import { AIMessage, ToolMessage } from "@langchain/core/messages";
-import { toolRegistry } from "@/lib/tool-registry";
+import { toolRegistry } from "@/lib/tools";
 import { mcpClientManager } from "@/lib/mcp/manager";
 import { weatherToolAdapter, projectFileResourceAdapter, listFilesAdapter } from "@/lib/mcp/adapters";
 import { ChatStreamChunk, createToolCallChunk, createToolResultChunk, createResourceStartChunk, createResourceEndChunk, createResourceErrorChunk } from "@/lib/ai/stream";
 import { withTimeout } from "@/lib/ai/debug/timeout-detector";
+import { capabilityRegistry, createCapabilityId } from "@/lib/capability/registry";
+import type { CapabilityIdentity } from "@/lib/capability/types";
 
 const WEATHER_SERVER_ID = 'weather-server';
 const PROJECT_FILES_SERVER_ID = 'project-files-server';
@@ -57,6 +59,22 @@ export async function executeTool(
   let hasAuthoritativeResult = false;
   let roundFailed = true;
 
+  const mcpToolCapabilityId = createCapabilityId({
+    name: toolName,
+    capabilityType: 'tool',
+    providerKind: 'mcp',
+    location: 'local',
+    serverId: toolName === 'get_weather' ? WEATHER_SERVER_ID : undefined,
+  });
+  
+  const mcpCapability = capabilityRegistry.get(mcpToolCapabilityId);
+  if (mcpCapability && mcpCapability.availability !== 'available') {
+    chunks.push(createToolCallChunk(toolCallId, toolName, args));
+    chunks.push(createToolResultChunk(toolCallId, toolName, `能力 ${toolName} 当前不可用 (${mcpCapability.availability})`, { isValid: false }));
+    failedToolCalls.push({ toolName, error: `能力不可用` });
+    return { chunks, messages, toolResults, failedToolCalls, hasAuthoritativeResult, roundFailed: true };
+  }
+
   if (toolName === "read_file") {
     const filename = String(args.filename || "");
     chunks.push(createResourceStartChunk(filename, `project://${filename}`, { serverId: PROJECT_FILES_SERVER_ID }));
@@ -97,44 +115,80 @@ export async function executeTool(
       }));
     }
   } else if (toolName === "get_weather") {
-    chunks.push(createToolCallChunk(toolCallId, toolName, args, { serverId: WEATHER_SERVER_ID, source: 'mcp' }));
+    chunks.push(createToolCallChunk(toolCallId, toolName, args));
     console.log(`[DEBUG-TOOL-RUNTIME] get_weather called with city: ${args.city}`);
 
     try {
-      const start = Date.now();
-      const mcpResult = await withTimeout(`weatherToolAdapter ${args.city}`, weatherToolAdapter({ city: String(args.city || "") }), { timeoutMs: 30000 });
-      const elapsed = Date.now() - start;
-      console.log(`[DEBUG-TOOL-RUNTIME] weatherToolAdapter completed in ${elapsed}ms`);
+      // 首先尝试本地工具
+      const localResult = await toolRegistry.execute(toolName, args);
+      const parsedResult = JSON.parse(localResult);
       
-      const weatherResult = JSON.stringify({
-        message: mcpResult.outputText,
-        city: String(args.city || ""),
-        source: mcpResult.source,
-      });
+      if (parsedResult.error) {
+        // 如果本地工具失败，尝试MCP服务
+        console.log(`[DEBUG-TOOL-RUNTIME] Local weather tool failed, trying MCP...`);
+        try {
+          const start = Date.now();
+          const mcpResult = await withTimeout(`weatherToolAdapter ${args.city}`, weatherToolAdapter({ city: String(args.city || "") }), { timeoutMs: 30000 });
+          const elapsed = Date.now() - start;
+          console.log(`[DEBUG-TOOL-RUNTIME] weatherToolAdapter completed in ${elapsed}ms`);
+          
+          const weatherResult = JSON.stringify({
+            message: mcpResult.outputText,
+            city: String(args.city || ""),
+            source: mcpResult.source,
+          });
 
-      chunks.push(createToolResultChunk(toolCallId, toolName, weatherResult, {
-        isValid: true,
-        isAuthoritative: true,
-        serverId: mcpResult.serverId,
-        source: mcpResult.source,
-      }));
+          chunks.push(createToolResultChunk(toolCallId, toolName, weatherResult, {
+            isValid: true,
+            isAuthoritative: true,
+            serverId: mcpResult.serverId,
+            source: mcpResult.source,
+          }));
 
-      toolResults.push({ toolName, result: weatherResult, isAuthoritative: true });
-      hasAuthoritativeResult = true;
+          toolResults.push({ toolName, result: weatherResult, isAuthoritative: true });
+          hasAuthoritativeResult = true;
 
-      messages.push(new ToolMessage({
-        content: weatherResult,
-        tool_call_id: toolCallId,
-      }));
-      roundFailed = false;
-      console.log(`[DEBUG-TOOL-RUNTIME] get_weather successful, roundFailed: false`);
+          messages.push(new ToolMessage({
+            content: weatherResult,
+            tool_call_id: toolCallId,
+          }));
+          roundFailed = false;
+          console.log(`[DEBUG-TOOL-RUNTIME] get_weather successful via MCP, roundFailed: false`);
+        } catch (mcpErr) {
+          // MCP也失败，使用本地错误结果
+          console.log(`[DEBUG-TOOL-RUNTIME] Both local and MCP failed, using local error result`);
+          chunks.push(createToolResultChunk(toolCallId, toolName, localResult, {
+            isValid: false,
+          }));
+          failedToolCalls.push({ toolName, error: parsedResult.error });
+          messages.push(new ToolMessage({
+            content: localResult,
+            tool_call_id: toolCallId,
+          }));
+        }
+      } else {
+        // 本地工具成功
+        chunks.push(createToolResultChunk(toolCallId, toolName, localResult, {
+          isValid: true,
+          isAuthoritative: false,
+        }));
+
+        toolResults.push({ toolName, result: localResult, isAuthoritative: false });
+        hasAuthoritativeResult = true;
+
+        messages.push(new ToolMessage({
+          content: localResult,
+          tool_call_id: toolCallId,
+        }));
+        roundFailed = false;
+        console.log(`[DEBUG-TOOL-RUNTIME] get_weather successful via local tool, roundFailed: false`);
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "天气查询失败";
-      console.error(`[DEBUG-TOOL-RUNTIME] get_weather failed: ${errorMsg}`);
+      console.error(`[DEBUG-TOOL-RUNTIME] get_weather failed completely: ${errorMsg}`);
       
       chunks.push(createToolResultChunk(toolCallId, toolName, JSON.stringify({ error: errorMsg }), {
         isValid: false,
-        serverId: WEATHER_SERVER_ID,
       }));
       failedToolCalls.push({ toolName, error: errorMsg });
       messages.push(new ToolMessage({

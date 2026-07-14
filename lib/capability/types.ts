@@ -63,3 +63,12 @@ export interface CapabilityExecutionResult {
   error?: string;
   metadata?: Record<string, unknown>;
 }
+
+export interface ExecutedToolResult {
+  toolCall: {
+    name: string;
+    arguments: Record<string, unknown>;
+  };
+  result: string;
+  success: boolean;
+}
