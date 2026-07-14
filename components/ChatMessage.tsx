@@ -31,6 +31,17 @@ export default function ChatMessageComponent({
       ? streamingText
       : message.content;
 
+  console.log("[ChatMessage] 渲染消息:", {
+    role: message.role,
+    isStreaming,
+    isUser,
+    messageBlocksLength: message.blocks?.length || 0,
+    streamingBlocksLength: streamingBlocks.length,
+    allBlocksLength: allBlocks.length,
+    textContentLength: textContent?.length || 0,
+    textContentPreview: textContent?.substring(0, 50),
+  });
+
   if (isSystem) return null;
 
   return (
@@ -76,14 +87,20 @@ export default function ChatMessageComponent({
           {!isUser && (
             <div className="rounded-2xl bg-white px-4 py-3 text-sm text-gray-800 shadow-sm ring-1 ring-gray-100 dark:bg-gray-900 dark:text-gray-200 dark:ring-gray-800">
               {allBlocks.length > 0 ? (
-                allBlocks.map((block, idx) => {
-                  const toolStep = block.type === "tool_call"
-                    ? allBlocks.filter((b, i) => b.type === "tool_call" && i <= idx).length
-                    : undefined;
-                  return <StructuredBlockView key={idx} block={block} step={toolStep} />;
-                })
+                <>
+                  {console.log("[ChatMessage] 走结构化块渲染路径，blocks数量:", allBlocks.length)}
+                  {allBlocks.map((block, idx) => {
+                    const toolStep = block.type === "tool_call"
+                      ? allBlocks.filter((b, i) => b.type === "tool_call" && i <= idx).length
+                      : undefined;
+                    return <StructuredBlockView key={idx} block={block} step={toolStep} />;
+                  })}
+                </>
               ) : (
-                <MarkdownRenderer content={textContent || ""} />
+                <>
+                  {console.log("[ChatMessage] 走文本渲染路径，textContent长度:", textContent?.length)}
+                  <MarkdownRenderer content={textContent || ""} />
+                </>
               )}
 
               {isStreaming && (

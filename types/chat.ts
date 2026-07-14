@@ -82,6 +82,7 @@ export interface ChatRequest {
 export interface ChatHookReturn {
   messages: ChatMessage[];
   streamingBlocks: StructuredBlock[];
+  streamingText: string;
   status: StreamStatus;
   error: string | null;
   mode: SkillId;
@@ -89,4 +90,5 @@ export interface ChatHookReturn {
   sendMessage: (text: string, files?: FileInfo[]) => Promise<void>;
   cancelStream: () => void;
   clearMessages: () => void;
+  regenerateLastResponse: () => void;
 }

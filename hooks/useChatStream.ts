@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import type { ChatMessage, ChatHookReturn, FileInfo, StreamStatus, StreamChunk, StructuredBlock } from "@/types/chat";
 import { validateMessageText, validateFile } from "@/lib/validators";
+import { useStreamTextBuffer } from "./useStreamTextBuffer";
 
 export type SkillId = "utility-skill" | "reader-skill";
 
@@ -26,12 +27,18 @@ async function getPublicIP(): Promise<string | null> {
 
 export function useChatStream(): ChatHookReturn {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [streamingBlocks, setStreamingBlocks] = useState<StructuredBlock[]>([]);
   const [status, setStatus] = useState<StreamStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [skill, setSkill] = useState<SkillId>("utility-skill");
   const [clientIP, setClientIP] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  const {
+    streamingBlocks,
+    streamingText,
+    addChunk,
+    clearBuffer,
+  } = useStreamTextBuffer();
 
   useEffect(() => {
     getPublicIP().then((ip) => {
@@ -81,7 +88,7 @@ export function useChatStream(): ChatHookReturn {
 
       setError(null);
       setStatus("loading");
-      setStreamingBlocks([]);
+      clearBuffer();
 
       const userMessage: ChatMessage = {
         role: "user",
@@ -113,137 +120,76 @@ export function useChatStream(): ChatHookReturn {
         setStatus("streaming");
 
         const decoder = new TextDecoder();
-        const blocks: StructuredBlock[] = [];
         let buffer = "";
         let isStreamDone = false;
+        const collectedBlocks: StructuredBlock[] = [];
+        let collectedText = "";
+
+        console.log("[sendMessage] 开始接收流数据，初始化 collectedText = ''");
 
         while (!isStreamDone) {
           const { done, value } = await reader.read();
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
+          console.log("[sendMessage] 读取到数据块，当前 buffer 长度:", buffer.length);
 
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
+          console.log("[sendMessage] 解析出", lines.length, "行完整数据，剩余 buffer 长度:", buffer.length);
 
           for (const line of lines) {
             if (!line.trim()) continue;
 
             try {
               const chunk: StreamChunk = JSON.parse(line);
+              console.log("[sendMessage] 解析到 chunk:", chunk.type, chunk.content?.substring(0, 50) + "...");
+              
+              addChunk(chunk);
+
+              if (chunk.type === "text") {
+                const addedText = chunk.content || "";
+                collectedText += addedText;
+                console.log("[sendMessage] ✅ text chunk，追加内容长度:", addedText.length, 
+                  "，collectedText 总长度:", collectedText.length,
+                  "，collectedText 内容:", collectedText.substring(0, 100));
+              }
+
+              const block: StructuredBlock = {
+                type: chunk.type as StructuredBlock["type"],
+                content: chunk.content || "",
+                toolCallId: chunk.toolCallId,
+                toolName: chunk.toolName,
+                toolArgs: chunk.toolArgs,
+                toolResult: chunk.toolResult,
+                isValid: chunk.isValid,
+                resourceName: chunk.resourceName,
+                resourceUri: chunk.resourceUri,
+                serverId: chunk.serverId,
+                isTruncated: chunk.isTruncated,
+                previewChars: chunk.previewChars,
+              };
+              collectedBlocks.push(block);
+              console.log("[sendMessage] ✅ 收集到 block:", chunk.type, "，collectedBlocks 数量:", collectedBlocks.length);
 
               switch (chunk.type) {
                 case "start":
+                  console.log("[sendMessage] ⏳ 流开始，messageId:", chunk.messageId);
                   break;
-
-                case "reasoning":
-                  updateBlock(blocks, "reasoning", chunk.content || "");
-                  setStreamingBlocks([...blocks]);
-                  break;
-
-                case "tool_call": {
-                  blocks.push({
-                    type: "tool_call",
-                    content: `调用工具: ${chunk.toolName}`,
-                    toolCallId: chunk.toolCallId,
-                    toolName: chunk.toolName,
-                    toolArgs: chunk.toolArgs,
-                  });
-                  setStreamingBlocks([...blocks]);
-                  break;
-                }
-
-                case "tool_result": {
-                  blocks.push({
-                    type: "tool_result",
-                    content: chunk.toolResult || "",
-                    toolCallId: chunk.toolCallId,
-                    toolName: chunk.toolName,
-                    toolResult: chunk.toolResult,
-                    isValid: chunk.isValid,
-                    serverId: chunk.serverId,
-                  });
-                  setStreamingBlocks([...blocks]);
-                  break;
-                }
-
-                case "resource_start": {
-                  blocks.push({
-                    type: "resource_start",
-                    content: `读取资源: ${chunk.resourceName}`,
-                    resourceName: chunk.resourceName,
-                    resourceUri: chunk.resourceUri,
-                    serverId: chunk.serverId,
-                  });
-                  setStreamingBlocks([...blocks]);
-                  break;
-                }
-
-                case "resource_end": {
-                  blocks.push({
-                    type: "resource_end",
-                    content: chunk.contentPreview || "",
-                    resourceName: chunk.resourceName,
-                    resourceUri: chunk.resourceUri,
-                    serverId: chunk.serverId,
-                    isTruncated: chunk.isTruncated,
-                    previewChars: chunk.previewChars,
-                  });
-                  setStreamingBlocks([...blocks]);
-                  break;
-                }
-
-                case "resource_error": {
-                  blocks.push({
-                    type: "resource_error",
-                    content: chunk.error || "",
-                    resourceName: chunk.resourceName,
-                    resourceUri: chunk.resourceUri,
-                    serverId: chunk.serverId,
-                  });
-                  setStreamingBlocks([...blocks]);
-                  break;
-                }
-
-                case "text": {
-                  const text = chunk.content || "";
-                  const lastBlock = blocks[blocks.length - 1];
-                  if (lastBlock?.type === "text") {
-                    lastBlock.content += text;
-                  } else {
-                    blocks.push({ type: "text", content: text });
-                  }
-                  setStreamingBlocks([...blocks]);
-                  break;
-                }
 
                 case "error": {
-                  const errorText = chunk.error || "服务端错误";
-                  blocks.push({ type: "text", content: `⚠️ 错误：${errorText}` });
-                  setStreamingBlocks([...blocks]);
-                  
+                  console.error("[sendMessage] ❌ 流错误:", chunk.error);
                   if (chunk.retryable !== false) {
                     setStatus("retrying");
                   }
                   break;
                 }
 
-                case "recovering": {
-                  blocks.push({ type: "text", content: `🔄 ${chunk.message}` });
-                  setStreamingBlocks([...blocks]);
-                  break;
-                }
-
-                case "recovery_fallback": {
-                  blocks.push({ type: "text", content: `📌 ${chunk.message}（${chunk.fallbackMethod}）` });
-                  setStreamingBlocks([...blocks]);
-                  break;
-                }
-
                 case "done":
+                  console.log("[sendMessage] ✅ 流结束");
                   isStreamDone = true;
                   break;
-              }
+                }
             } catch (parseErr) {
               if (parseErr instanceof Error && parseErr.message.includes("服务端错误")) {
                 throw parseErr;
@@ -256,18 +202,25 @@ export function useChatStream(): ChatHookReturn {
           if (isStreamDone) break;
         }
 
+        console.log("[sendMessage] 循环结束，最终 collectedText:", collectedText);
+        console.log("[sendMessage] 闭包中的 streamingText（旧值）:", streamingText);
+
         const assistantMessage: ChatMessage = {
           role: "assistant",
-          content: blocks.filter((b) => b.type === "text").map((b) => b.content).join(""),
-          blocks,
+          content: collectedText || streamingText,
+          blocks: collectedBlocks,
         };
+
+        console.log("[sendMessage] 创建 assistantMessage，content 长度:", assistantMessage.content.length);
+        console.log("[sendMessage] 创建 assistantMessage，blocks 数量:", collectedBlocks.length);
+        console.log("[sendMessage] 闭包中的 streamingBlocks（旧值）数量:", streamingBlocks.length);
 
         setMessages((prev) => {
           const newMessages = trimMessages([...prev, assistantMessage]);
           return newMessages;
         });
 
-        setStreamingBlocks([]);
+        clearBuffer();
         setStatus("idle");
       } catch (err: unknown) {
         if (err instanceof DOMException && err.name === "AbortError") {
@@ -296,18 +249,47 @@ export function useChatStream(): ChatHookReturn {
 
   const clearMessages = useCallback(() => {
     setMessages([]);
-    setStreamingBlocks([]);
+    clearBuffer();
     setError(null);
     setStatus("idle");
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
     }
-  }, []);
+  }, [clearBuffer]);
+
+  const regenerateLastResponse = useCallback(() => {
+    // Find the last user message
+    let lastUserIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        lastUserIndex = i;
+        break;
+      }
+    }
+    
+    if (lastUserIndex === -1) {
+      setError("没有找到可以重新生成的用户消息");
+      return;
+    }
+
+    // Remove all messages after the last user message (typically just the last assistant message)
+    const messagesUpToLastUser = messages.slice(0, lastUserIndex + 1);
+    
+    // Get the last user message content
+    const lastUserMessage = messagesUpToLastUser[lastUserIndex];
+    
+    // Update messages to remove the last assistant response
+    setMessages(messagesUpToLastUser);
+    
+    // Send the last user message again to regenerate the response
+    sendMessage(lastUserMessage.content, lastUserMessage.files);
+  }, [messages, sendMessage]);
 
   return {
     messages,
     streamingBlocks,
+    streamingText,
     status,
     error,
     mode: skill,
@@ -315,15 +297,6 @@ export function useChatStream(): ChatHookReturn {
     sendMessage,
     cancelStream,
     clearMessages,
+    regenerateLastResponse,
   };
-}
-
-function updateBlock(blocks: StructuredBlock[], type: StructuredBlock["type"], content: string) {
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    if (blocks[i].type === type) {
-      blocks[i].content += content;
-      return;
-    }
-  }
-  blocks.push({ type, content });
 }
