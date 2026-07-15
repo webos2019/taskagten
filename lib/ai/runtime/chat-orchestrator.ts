@@ -1,37 +1,17 @@
-import { AIMessage, HumanMessage, SystemMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
-import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
-import { getDeepSeekModel } from "@/lib/deepseek";
-import { skillRegistry } from "@/lib/skill-registry";
-import type { SkillDefinition, CapabilityType, CapabilityExecutionResult } from "@/lib/capability/types";
-import type { ChatSession } from "./chat-session";
-import type { ToolCall } from "./tool-runtime";
-import { executeTool } from "./tool-runtime";
 import { StreamLifecycle, createId, createTextChunk, createRecoveringChunk, createRecoveryFallbackChunk } from "@/lib/ai/stream";
 import type { StreamWriter } from "@/lib/ai/stream";
-import { withTimeout } from "@/lib/ai/debug/timeout-detector";
-import { resolveCapabilityContextInvocations } from "@/lib/capability/context";
-import { resolveLocalCapabilityContextInvocations } from "@/lib/capability/local-context";
-import { capabilityRegistry, createCapabilityId } from "@/lib/capability/registry";
-import type { CapabilityIdentity, ExecutedToolResult } from "@/lib/capability/types";
+import type { ChatSession } from "./chat-session";
+import { createInitialState, applyStatePatch, type OrchestrationState, type StatePatch } from "./orchestration-state";
+import { stepExecutors, type StepOperationOptions, graphNodeExecutors } from "./orchestration-steps";
+import { determineNextNode, isTerminalNode, configureGraphWithRoutes } from "./orchestration-router";
+import { createOrchestrationGraph, GraphStateSchema } from "./orchestration-state";
 
-const MAX_TOOL_CALLS = 5;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 2000;
 
 export interface OrchestratorContext {
   clientIP?: string;
 }
-
-interface CapabilityInvocation {
-  capabilityType: CapabilityType;
-  capabilityId: string;
-  name: string;
-  serverId?: string;
-  input: string;
-  execute: (options?: { writer?: unknown; lifecycle?: unknown }) => Promise<CapabilityExecutionResult>;
-}
-
-type CapabilityResolver = (userGoal: string, skillDefinition: SkillDefinition, executedToolResults?: ExecutedToolResult[]) => CapabilityInvocation[];
 
 export async function orchestrateChat(
   session: ChatSession,
@@ -46,7 +26,7 @@ export async function orchestrateChat(
 
   while (recoveryAttempts <= MAX_RETRY_ATTEMPTS) {
     try {
-      await doOrchestrateChat(session, writer, context, lifecycle, recoveryAttempts);
+      await runOrchestrationGraph(session, writer, context, lifecycle, recoveryAttempts);
       lifecycle.close();
       return;
     } catch (err) {
@@ -61,7 +41,7 @@ export async function orchestrateChat(
         lifecycle.writeChunk(createRecoveryFallbackChunk(`多次尝试恢复失败，将尝试直接回答`, "direct-answer"));
         
         try {
-          await fallbackToDirectAnswer(session, writer, context, lifecycle);
+          await executeFallbackDirectAnswer(session, writer, context, lifecycle);
         } catch (fallbackErr) {
           lifecycle.emitErrorOnce(fallbackErr instanceof Error ? fallbackErr.message : "服务不可用");
         }
@@ -73,319 +53,186 @@ export async function orchestrateChat(
   }
 }
 
-async function doOrchestrateChat(
+async function runOrchestrationGraph(
   session: ChatSession,
   writer: StreamWriter,
   context: OrchestratorContext,
   lifecycle: StreamLifecycle,
   attempt: number
 ): Promise<void> {
-  let currentMessages = [...session.getMessages()];
-  const model = session.getModel();
-  const skill = skillRegistry.get(session.getSkillId());
-  const resultPolicy = skill?.getResultPolicy() || "auto";
-  const outputPolicy = skill?.getOutputPolicy() || "concise-utility";
-  const skillDefinition = skill?.toCapabilityDefinition();
-
-  const userGoal = currentMessages[currentMessages.length - 1]?.content as string || "";
+  const initialMessages = [...session.getMessages()];
+  let state = createInitialState(initialMessages);
   
-  console.log(`[Chat Orchestrator] 当前 Skill: ${skill?.meta.id || 'default'}, 用户目标: ${userGoal.substring(0, 50)}...`);
-  console.log(`[Chat Orchestrator] Result Policy: ${resultPolicy}, Output Policy: ${outputPolicy}`);
-
-  await consumeCapabilityContext(
-    userGoal,
-    skillDefinition,
-    currentMessages,
+  const stepOptions: StepOperationOptions = {
+    session,
     lifecycle,
-    "远程",
-    resolveCapabilityContextInvocations
-  );
+    context,
+  };
 
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", session.getSystemPrompt()],
-    new MessagesPlaceholder("messages"),
-  ]);
-
-  const chain = prompt.pipe(model);
-
-  let toolCallCount = 0;
-  let hasToolCalls = false;
-  let hasAuthoritativeResult = false;
-  const toolResults: Array<{ toolName: string; result: string; isAuthoritative: boolean }> = [];
-  const executedToolResults: ExecutedToolResult[] = [];
-
-  while (toolCallCount < MAX_TOOL_CALLS) {
-    const result = await withTimeout('LLM chain.invoke', chain.invoke({ messages: currentMessages }), { timeoutMs: 60000 });
-    const toolCalls = parseToolCalls(result);
-
-    if (toolCalls.length === 0) {
-      if (!hasToolCalls) {
-        const content = result.content;
-        if (content) {
-          const text = typeof content === "string" ? content : JSON.stringify(content);
-          lifecycle.writeChunk(createTextChunk(text));
-        }
-      }
+  while (!isTerminalNode(state.currentNode)) {
+    const { nextNode, route } = determineNextNode(state);
+    
+    const executor = stepExecutors[nextNode];
+    if (!executor) {
       break;
     }
 
-    hasToolCalls = true;
-    currentMessages.push(result);
-
-    let roundFailed = true;
-    for (const tc of toolCalls) {
-      if (skill) {
-        const capabilityIdentity: CapabilityIdentity = {
-          name: tc.name,
-          capabilityType: 'tool',
-          providerKind: 'internal',
-          location: 'local',
-        };
-        
-        if (!skill.isCapabilityAllowed(capabilityIdentity)) {
-          console.log(`[Chat Orchestrator] 工具 ${tc.name} 不在 Skill ${skill.meta.id} 的能力范围内，跳过`);
-          lifecycle.writeChunk(createTextChunk(`⚠️ 工具 ${tc.name} 不在当前技能的能力范围内`));
-          continue;
-        }
-      }
-
-      const executionResult = await withTimeout(`executeToolWithRetry ${tc.name}`, executeToolWithRetry(tc, { clientIP: context.clientIP }, lifecycle), { timeoutMs: 45000 });
-
-      executionResult.chunks.forEach(chunk => lifecycle.writeChunk(chunk));
-      executionResult.messages.forEach(msg => currentMessages.push(msg));
-      executionResult.toolResults.forEach(tr => {
-        toolResults.push(tr);
-        executedToolResults.push({
-          toolCall: { name: tr.toolName, arguments: {} },
-          result: tr.result,
-          success: true,
-        });
-      });
-
-      if (executionResult.hasAuthoritativeResult) {
-        hasAuthoritativeResult = true;
-      }
-      if (!executionResult.roundFailed) {
-        roundFailed = false;
-      }
-
-      toolCallCount++;
-    }
-
-    if (roundFailed) {
-      break;
-    }
-
-    if (toolCallCount >= MAX_TOOL_CALLS) {
-      break;
-    }
-  }
-
-  await consumeCapabilityContext(
-    userGoal,
-    skillDefinition,
-    currentMessages,
-    lifecycle,
-    "本地",
-    resolveLocalCapabilityContextInvocations,
-    executedToolResults
-  );
-
-  if (hasToolCalls) {
-    if (toolResults.length > 0) {
-      if (resultPolicy === "tool-first" && hasAuthoritativeResult) {
-        const authoritativeResults = toolResults.filter(r => r.isAuthoritative);
-        for (const tr of authoritativeResults) {
-          const formattedText = formatToolResultForText(tr.result, tr.toolName);
-          lifecycle.writeChunk(createTextChunk(formattedText));
-        }
-      } else {
-        await generateSummaryAnswer(session, currentMessages, lifecycle, outputPolicy);
-      }
-    } else {
-      lifecycle.writeChunk(createTextChunk("抱歉，工具调用失败，请稍后重试。"));
-    }
+    const patch = await executor(state, stepOptions);
+    
+    state = applyStatePatch(state, {
+      ...patch,
+      routes: [route],
+    });
   }
 
   lifecycle.emitDoneOnce();
 }
 
-async function consumeCapabilityContext(
-  userGoal: string,
-  skillDefinition: SkillDefinition | undefined,
-  currentMessages: BaseMessage[],
-  lifecycle: StreamLifecycle,
-  capabilityType: string,
-  resolver: CapabilityResolver,
-  executedToolResults?: ExecutedToolResult[]
-): Promise<void> {
-  const capabilityInvocations = skillDefinition 
-    ? resolver(userGoal, skillDefinition, executedToolResults)
-    : [];
-
-  console.log(`[Chat Orchestrator] 发现 ${capabilityInvocations.length} 个${capabilityType}能力调用`);
-
-  for (const invocation of capabilityInvocations) {
-    const capabilityDef = capabilityRegistry.get(invocation.capabilityId);
-    
-    if (capabilityDef) {
-      console.log(`[Chat Orchestrator] ${capabilityType}能力 ${invocation.name} 状态: ${capabilityDef.availability}`);
-      
-      if (capabilityDef.availability !== 'available') {
-        lifecycle.writeChunk(createTextChunk(`⚠️ ${capabilityType}能力 ${invocation.name} 当前不可用 (${capabilityDef.availability})`));
-        continue;
-      }
-    }
-    
-    lifecycle.writeChunk(createTextChunk(`🔍 调用${capabilityType}能力: ${invocation.name}`));
-    
-    try {
-      const capabilityResult = await invocation.execute({ writer: null, lifecycle });
-      console.log(`[Chat Orchestrator] ${capabilityType}能力 ${invocation.name} 执行结果: ${capabilityResult.success ? '成功' : '失败'}`);
-      
-      if (capabilityResult.success && capabilityResult.content) {
-        lifecycle.writeChunk(createTextChunk(`📊 ${capabilityType}能力结果: ${capabilityResult.content}`));
-        
-        if (capabilityType === "远程") {
-          currentMessages.push(new HumanMessage(`${capabilityType}能力 [${invocation.name}] 结果: ${capabilityResult.content}`));
-        }
-      }
-    } catch (capabilityErr) {
-      console.error(`[Chat Orchestrator] ${capabilityType}能力 ${invocation.name} 调用失败:`, capabilityErr);
-      lifecycle.writeChunk(createTextChunk(`⚠️ ${capabilityType}能力 ${invocation.name} 调用失败`));
-    }
-  }
-}
-
-async function executeToolWithRetry(
-  toolCall: ToolCall,
-  context: OrchestratorContext,
-  lifecycle: StreamLifecycle
-) {
-  let attempts = 0;
-  let executionResult = await executeTool(toolCall, context);
-  
-  while (attempts < 2) {
-    if (!executionResult.roundFailed) {
-      return executionResult;
-    }
-    
-    attempts++;
-    if (attempts < 2) {
-      lifecycle.writeChunk(createRecoveringChunk(`工具 ${toolCall.name} 调用失败，正在重试...`, attempts, 2));
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      executionResult = await executeTool(toolCall, context);
-    }
-  }
-  
-  return executionResult;
-}
-
-async function fallbackToDirectAnswer(
+async function executeFallbackDirectAnswer(
   session: ChatSession,
   writer: StreamWriter,
   context: OrchestratorContext,
   lifecycle: StreamLifecycle
 ): Promise<void> {
-  const messages = [...session.getMessages()];
-  const model = session.getModel();
+  const initialMessages = [...session.getMessages()];
+  let state = createInitialState(initialMessages);
   
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", session.getSystemPrompt()],
-    new MessagesPlaceholder("messages"),
-  ]);
+  const stepOptions: StepOperationOptions = {
+    session,
+    lifecycle,
+    context,
+  };
 
-  const chain = prompt.pipe(model);
-  const result = await chain.invoke({ messages });
-  
-  const content = result.content;
-  if (content) {
-    const text = typeof content === "string" ? content : JSON.stringify(content);
-    lifecycle.writeChunk(createTextChunk(text));
+  const fallbackExecutor = stepExecutors["FALLBACK"];
+  if (fallbackExecutor) {
+    const patch = await fallbackExecutor(state, stepOptions);
+    state = applyStatePatch(state, patch);
   }
   
   lifecycle.emitDoneOnce();
 }
 
-async function generateSummaryAnswer(
+export async function orchestrateChatWithLangGraph(
   session: ChatSession,
-  currentMessages: BaseMessage[],
-  lifecycle: StreamLifecycle,
-  outputPolicy: string = "concise-utility"
+  writer: StreamWriter,
+  context: OrchestratorContext
 ): Promise<void> {
-  const model = session.getModel();
-  
-  let outputInstruction = "";
-  if (outputPolicy === "detailed-explanation") {
-    outputInstruction = "\n\n请提供详细的解释，包括分析过程和步骤。";
-  }
-  
-  const fallbackPrompt = ChatPromptTemplate.fromMessages([
-    ["system", session.getSystemPrompt()],
-    new MessagesPlaceholder("messages"),
-  ]);
-  const summaryChain = fallbackPrompt.pipe(model);
+  const lifecycle = new StreamLifecycle(writer);
+  const messageId = createId();
+  lifecycle.emitStartOnce(messageId);
 
-  const toolResultMessages = currentMessages.filter(m => m._getType() === "tool");
-  const toolResultText = toolResultMessages.map(m => (m as ToolMessage).content).join("\n\n");
+  let recoveryAttempts = 0;
 
-  const summaryMessages: BaseMessage[] = [
-    new SystemMessage(session.getSystemPrompt()),
-    new HumanMessage(`用户问：${currentMessages[currentMessages.length - 1].content}\n\n工具调用结果：\n${toolResultText}\n\n请根据工具结果用自然语言总结回答用户。${outputInstruction}`),
-  ];
-
-  const finalResult = await summaryChain.invoke({ messages: summaryMessages });
-  const finalContent = finalResult.content;
-
-  if (finalContent) {
-    const text = typeof finalContent === "string" ? finalContent : JSON.stringify(finalContent);
-    lifecycle.writeChunk(createTextChunk(text));
-  }
-}
-
-function parseToolCalls(result: AIMessage): ToolCall[] {
-  if (result.tool_calls && result.tool_calls.length > 0) {
-    return result.tool_calls.map((tc) => ({
-      id: tc.id ?? createId(),
-      name: tc.name,
-      args: tc.args || {},
-    }));
-  }
-  if (result.additional_kwargs?.tool_calls && result.additional_kwargs.tool_calls.length > 0) {
-    return result.additional_kwargs.tool_calls.map((tc: any) => {
-      const args = typeof tc.function?.arguments === "string"
-        ? JSON.parse(tc.function.arguments)
-        : (tc.function?.arguments || {});
-      return {
-        id: tc.id ?? createId(),
-        name: tc.function?.name || tc.name,
-        args,
-      };
-    });
-  }
-  return [];
-}
-
-function formatToolResultForText(toolResult: string, toolName: string): string {
-  try {
-    const parsed = JSON.parse(toolResult);
-    if (parsed.message) {
-      return parsed.message;
-    }
-    if (parsed.result !== undefined) {
-      if (parsed.fromName && parsed.toName) {
-        return `${parsed.value} ${parsed.fromName} = ${parsed.result} ${parsed.toName}`;
+  while (recoveryAttempts <= MAX_RETRY_ATTEMPTS) {
+    try {
+      await runLangGraphOrchestration(session, writer, context, lifecycle, recoveryAttempts);
+      lifecycle.close();
+      return;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "未知错误";
+      
+      if (recoveryAttempts < MAX_RETRY_ATTEMPTS) {
+        recoveryAttempts++;
+        lifecycle.writeChunk(createRecoveringChunk(`服务遇到问题，正在尝试恢复... (${recoveryAttempts}/${MAX_RETRY_ATTEMPTS})`, recoveryAttempts, MAX_RETRY_ATTEMPTS));
+        
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * recoveryAttempts));
+      } else {
+        lifecycle.writeChunk(createRecoveryFallbackChunk(`多次尝试恢复失败，将尝试直接回答`, "direct-answer"));
+        
+        try {
+          await executeFallbackDirectAnswer(session, writer, context, lifecycle);
+        } catch (fallbackErr) {
+          lifecycle.emitErrorOnce(fallbackErr instanceof Error ? fallbackErr.message : "服务不可用");
+        }
+        
+        lifecycle.close();
+        return;
       }
-      return String(parsed.result);
     }
-    if (parsed.expression !== undefined) {
-      return `${parsed.expression} = ${parsed.result}`;
-    }
-    if (parsed.currentTime) {
-      return `当前时间：${parsed.currentTime}`;
-    }
-    return JSON.stringify(parsed, null, 2);
-  } catch {
-    return toolResult;
   }
+}
+
+async function runLangGraphOrchestration(
+  session: ChatSession,
+  writer: StreamWriter,
+  context: OrchestratorContext,
+  lifecycle: StreamLifecycle,
+  attempt: number
+): Promise<void> {
+  const initialMessages = [...session.getMessages()];
+  
+  const stepOptions: StepOperationOptions = {
+    session,
+    lifecycle,
+    context,
+  };
+
+  const { graph, START, END } = createOrchestrationGraph();
+
+  graph.addNode("LLM_INVOKE", graphNodeExecutors["LLM_INVOKE"]);
+  graph.addNode("TOOL_CALL_EXECUTION", graphNodeExecutors["TOOL_CALL_EXECUTION"]);
+  graph.addNode("CHECK_TOOL_RESULTS", graphNodeExecutors["CHECK_TOOL_RESULTS"]);
+  graph.addNode("GENERATE_SUMMARY", graphNodeExecutors["GENERATE_SUMMARY"]);
+  graph.addNode("DIRECT_ANSWER", graphNodeExecutors["DIRECT_ANSWER"]);
+  graph.addNode("CONSUME_LOCAL_CAPABILITY", graphNodeExecutors["CONSUME_LOCAL_CAPABILITY"]);
+  graph.addNode("FALLBACK", graphNodeExecutors["FALLBACK"]);
+
+  graph.addEdge(START, "LLM_INVOKE");
+  
+  graph.addConditionalEdges(
+    "LLM_INVOKE",
+    (state: GraphState) => {
+      if (state.hasToolCalls && (state.toolCallCount ?? 0) < 5) {
+        return "TOOL_CALL_EXECUTION";
+      }
+      if (!state.hasToolCalls && (state.chunks?.length ?? 0) > 0) {
+        return "DIRECT_ANSWER";
+      }
+      return END;
+    },
+    { "TOOL_CALL_EXECUTION": "TOOL_CALL_EXECUTION", "DIRECT_ANSWER": "DIRECT_ANSWER", [END]: END }
+  );
+
+  graph.addEdge("TOOL_CALL_EXECUTION", "CHECK_TOOL_RESULTS");
+  
+  graph.addConditionalEdges(
+    "CHECK_TOOL_RESULTS",
+    (state: GraphState) => {
+      if (!(state.roundFailed ?? false) && (state.toolResults?.length ?? 0) > 0) {
+        return "GENERATE_SUMMARY";
+      }
+      if (!(state.roundFailed ?? false) && (state.toolResults?.length ?? 0) === 0 && (state.toolCallCount ?? 0) < 5) {
+        return "LLM_INVOKE";
+      }
+      return "CONSUME_LOCAL_CAPABILITY";
+    },
+    { "GENERATE_SUMMARY": "GENERATE_SUMMARY", "LLM_INVOKE": "LLM_INVOKE", "CONSUME_LOCAL_CAPABILITY": "CONSUME_LOCAL_CAPABILITY", [END]: END }
+  );
+
+  graph.addEdge("GENERATE_SUMMARY", END);
+  graph.addEdge("DIRECT_ANSWER", END);
+  graph.addEdge("CONSUME_LOCAL_CAPABILITY", END);
+  graph.addEdge("FALLBACK", END);
+
+  const app = graph.compile();
+
+  const initialState: typeof GraphStateSchema.State = {
+    messages: initialMessages,
+    toolCallCount: 0,
+    hasToolCalls: false,
+    hasAuthoritativeResult: false,
+    toolResults: [],
+    executedToolResults: [],
+    roundFailed: false,
+    chunks: [],
+    recoveryAttempts: 0,
+  };
+
+  await app.invoke(initialState, {
+    configurable: {
+      stepOptions,
+    },
+  });
+
+  lifecycle.emitDoneOnce();
 }

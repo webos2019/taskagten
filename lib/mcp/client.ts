@@ -84,6 +84,33 @@ export class MCPClient {
     }
   }
 
+  async getPrompt(name: string, args?: Record<string, unknown>): Promise<ReturnType<Client['getPrompt']>> {
+    if (!this.client) {
+      throw new Error('MCP client not connected');
+    }
+
+    console.log(`[DEBUG-MCP] [${this.config.serverId}] Getting prompt: ${name}`);
+    console.log(`[DEBUG-MCP] [${this.config.serverId}] Args: ${JSON.stringify(args || {})}`);
+
+    const start = Date.now();
+    try {
+      const result = await withTimeout(
+        `MCP getPrompt [${this.config.serverId}].${name}`,
+        this.client.getPrompt({ name, arguments: args || {} }),
+        { timeoutMs: 30000 }
+      );
+      const elapsed = Date.now() - start;
+      console.log(`[DEBUG-MCP] [${this.config.serverId}] Prompt completed! Elapsed: ${elapsed}ms`);
+      console.log(`[DEBUG-MCP] [${this.config.serverId}] Messages count: ${result.messages?.length || 0}`);
+      return result;
+    } catch (err) {
+      const elapsed = Date.now() - start;
+      console.error(`[DEBUG-MCP] [${this.config.serverId}] Prompt failed! Elapsed: ${elapsed}ms`);
+      console.error(`[DEBUG-MCP] [${this.config.serverId}] Error:`, err);
+      throw err;
+    }
+  }
+
   async readResource(uri: string): Promise<ReturnType<Client['readResource']>> {
     if (!this.client) {
       throw new Error('MCP client not connected');

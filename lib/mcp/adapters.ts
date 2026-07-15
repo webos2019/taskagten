@@ -117,6 +117,115 @@ export async function projectFileResourceAdapter(input: ProjectFileResourceAdapt
 
 interface ListFilesAdapterInput {}
 
+const TASKLIST_SERVER_ID = 'tasklist-server';
+
+export async function tasklistDraftPromptAdapter(goal: string): Promise<{
+  content: string;
+  serverId: string;
+  promptName: string;
+}> {
+  console.log(`[DEBUG-MCP-ADAPTER] tasklistDraftPromptAdapter called with goal: ${goal}`);
+
+  const start = Date.now();
+  const response = await withTimeout(
+    `mcpClientManager.getPrompt tasklist-draft`,
+    mcpClientManager.getPrompt(TASKLIST_SERVER_ID, 'tasklist-draft', { goal }),
+    { timeoutMs: 25000 }
+  );
+
+  const elapsed = Date.now() - start;
+  console.log(`[DEBUG-MCP-ADAPTER] tasklistDraftPromptAdapter completed in ${elapsed}ms`);
+
+  const messages = response.messages || [];
+  const textParts = messages
+    .filter(m => m.content)
+    .map(m => {
+      if (typeof m.content === 'string') return m.content;
+      if (Array.isArray(m.content)) {
+        return m.content
+          .filter((c: { type: string; text?: string }) => c.type === 'text')
+          .map((c: { text?: string }) => c.text || '')
+          .join('\n');
+      }
+      return '';
+    })
+    .filter(text => text.length > 0);
+
+  const content = textParts.join('\n\n') || '任务列表生成失败：未返回有效内容';
+
+  console.log(`[DEBUG-MCP-ADAPTER] tasklistDraftPromptAdapter result length: ${content.length}`);
+
+  return {
+    content,
+    serverId: TASKLIST_SERVER_ID,
+    promptName: 'tasklist-draft',
+  };
+}
+
+export async function latestContextResourceAdapter(): Promise<{
+  content: string;
+  serverId: string;
+  resourceName: string;
+}> {
+  console.log(`[DEBUG-MCP-ADAPTER] latestContextResourceAdapter called`);
+
+  const start = Date.now();
+  const response = await withTimeout(
+    `mcpClientManager.readResource project://latest-context`,
+    mcpClientManager.readResource(TASKLIST_SERVER_ID, 'project://latest-context'),
+    { timeoutMs: 25000 }
+  );
+
+  const elapsed = Date.now() - start;
+  console.log(`[DEBUG-MCP-ADAPTER] latestContextResourceAdapter completed in ${elapsed}ms`);
+
+  const contentsArray = response.contents as Array<{ uri: string; text?: string }>;
+  const resourceItem = contentsArray?.[0];
+
+  if (!resourceItem || !resourceItem.text) {
+    throw new MCPHostError('REQUEST_FAILED', '项目上下文 MCP Resource 没有返回可用内容。');
+  }
+
+  return {
+    content: resourceItem.text,
+    serverId: TASKLIST_SERVER_ID,
+    resourceName: 'project://latest-context',
+  };
+}
+
+export async function checkDocConsistencyToolAdapter(docContent: string, actualContent: string): Promise<{
+  content: string;
+  serverId: string;
+  toolName: string;
+}> {
+  console.log(`[DEBUG-MCP-ADAPTER] checkDocConsistencyToolAdapter called`);
+
+  const start = Date.now();
+  const response = await withTimeout(
+    `mcpClientManager.callTool check_doc_consistency`,
+    mcpClientManager.callTool(TASKLIST_SERVER_ID, 'check_doc_consistency', { docContent, actualContent }),
+    { timeoutMs: 25000 }
+  );
+
+  const elapsed = Date.now() - start;
+  console.log(`[DEBUG-MCP-ADAPTER] checkDocConsistencyToolAdapter completed in ${elapsed}ms`);
+
+  const contentArray = response.content as Array<{ type: string; text?: string }>;
+  const textContent = contentArray?.find(c => c.type === 'text')?.text || JSON.stringify(response, null, 2);
+
+  if (response.isError) {
+    throw new MCPHostError('REQUEST_FAILED', textContent || '文档一致性检查 MCP Tool 调用失败。');
+  }
+
+  return {
+    content: textContent,
+    serverId: TASKLIST_SERVER_ID,
+    toolName: 'check_doc_consistency',
+  };
+}
+
+interface ListFilesAdapterInputEmpty {}
+
 export async function listFilesAdapter(): Promise<{
   action: 'current';
   inputText: string;

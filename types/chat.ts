@@ -47,6 +47,7 @@ export type StreamChunkType =
 export interface StreamChunk {
   type: StreamChunkType;
   content?: string;
+  messageId?: string;
   toolCalls?: Array<{
     id: string;
     name: string;
@@ -74,9 +75,32 @@ export interface StreamChunk {
 
 export type SkillId = "utility-skill" | "reader-skill";
 
+export type ChatComposerCommandName = 'check' | 'summary' | 'tasklist';
+
+export interface ChatComposerCommand {
+  label: string;
+  name: ChatComposerCommandName;
+}
+
+export interface ChatComposerReference {
+  id: string;
+  label: string;
+  serverId?: string;
+  source: 'local' | 'remote';
+  type: 'resource';
+  uri: string;
+}
+
+export interface ChatComposerPayload {
+  command?: ChatComposerCommand;
+  plainText: string;
+  references?: ChatComposerReference[];
+}
+
 export interface ChatRequest {
   messages: ChatMessage[];
   skill?: SkillId;
+  composer?: ChatComposerPayload;
 }
 
 export interface ChatHookReturn {

@@ -1,5 +1,6 @@
 import type { SkillDefinition, CapabilityType, CapabilityIdentity, CapabilityExecutionResult, RemoteCapabilityInvocation } from './types';
 import { createCapabilityId } from './registry';
+import { tasklistDraftPromptAdapter, latestContextResourceAdapter, checkDocConsistencyToolAdapter } from '@/lib/mcp/adapters';
 
 export const LATEST_CONTEXT_RESOURCE_NAME = 'project://latest-context';
 export const TASKLIST_DRAFT_PROMPT_NAME = 'tasklist-draft';
@@ -46,35 +47,67 @@ export function createRemoteCapabilityIdentity(name: string, capabilityType: Cap
     capabilityType,
     providerKind: 'mcp',
     location: 'remote',
-    serverId: 'project-assistant-service',
+    serverId: 'tasklist-server',
   };
 }
 
 async function executeRemoteResourceInvocation(invocation: RemoteCapabilityInvocation): Promise<CapabilityExecutionResult> {
-  return {
-    success: true,
-    content: `[Mock Remote Resource] ${invocation.name}: 项目最新上下文信息（模拟数据）`,
-    messageCount: 1,
-    metadata: { resourceUri: invocation.input },
-  };
+  try {
+    const result = await latestContextResourceAdapter();
+    return {
+      success: true,
+      content: result.content,
+      messageCount: 1,
+      metadata: { resourceUri: invocation.input, serverId: result.serverId },
+    };
+  } catch (err) {
+    return {
+      success: false,
+      content: `项目上下文获取失败：${err instanceof Error ? err.message : '未知错误'}`,
+      messageCount: 0,
+      metadata: { resourceUri: invocation.input, error: err instanceof Error ? err.message : '未知' },
+    };
+  }
 }
 
 async function executeRemotePromptInvocation(invocation: RemoteCapabilityInvocation): Promise<CapabilityExecutionResult> {
-  return {
-    success: true,
-    content: `[Mock Remote Prompt] ${invocation.name}: 任务列表草稿模板已生成`,
-    messageCount: 2,
-    metadata: { promptInput: invocation.input },
-  };
+  try {
+    const goal = invocation.input.replace(/^goal=/, '');
+    const result = await tasklistDraftPromptAdapter(goal);
+    return {
+      success: true,
+      content: result.content,
+      messageCount: 1,
+      metadata: { promptInput: invocation.input, serverId: result.serverId, promptName: result.promptName },
+    };
+  } catch (err) {
+    return {
+      success: false,
+      content: `任务列表生成失败：${err instanceof Error ? err.message : '未知错误'}`,
+      messageCount: 0,
+      metadata: { promptInput: invocation.input, error: err instanceof Error ? err.message : '未知' },
+    };
+  }
 }
 
 async function executeRemoteToolInvocation(invocation: RemoteCapabilityInvocation): Promise<CapabilityExecutionResult> {
-  return {
-    success: true,
-    content: `[Mock Remote Tool] ${invocation.name} 执行结果：文档一致性检查通过，未发现明显不一致`,
-    messageCount: 1,
-    metadata: { toolInput: invocation.input },
-  };
+  try {
+    const input = invocation.input.replace(/^goal=/, '');
+    const result = await checkDocConsistencyToolAdapter(input, input);
+    return {
+      success: true,
+      content: result.content,
+      messageCount: 1,
+      metadata: { toolInput: invocation.input, serverId: result.serverId, toolName: result.toolName },
+    };
+  } catch (err) {
+    return {
+      success: false,
+      content: `文档一致性检查失败：${err instanceof Error ? err.message : '未知错误'}`,
+      messageCount: 0,
+      metadata: { toolInput: invocation.input, error: err instanceof Error ? err.message : '未知' },
+    };
+  }
 }
 
 function createRemoteCapabilityInvocation(
@@ -90,16 +123,16 @@ function createRemoteCapabilityInvocation(
     capabilityType,
     capabilityId,
     name,
-    serverId: 'project-assistant-service',
+    serverId: 'tasklist-server',
     input,
     execute: async () => {
       if (capabilityType === 'resource') {
-        return executeRemoteResourceInvocation({ capabilityType, capabilityId, name, serverId: 'project-assistant-service', input, execute: () => Promise.resolve({ success: true }) });
+        return executeRemoteResourceInvocation({ capabilityType, capabilityId, name, serverId: 'tasklist-server', input, execute: () => Promise.resolve({ success: true }) });
       }
       if (capabilityType === 'prompt') {
-        return executeRemotePromptInvocation({ capabilityType, capabilityId, name, serverId: 'project-assistant-service', input, execute: () => Promise.resolve({ success: true }) });
+        return executeRemotePromptInvocation({ capabilityType, capabilityId, name, serverId: 'tasklist-server', input, execute: () => Promise.resolve({ success: true }) });
       }
-      return executeRemoteToolInvocation({ capabilityType, capabilityId, name, serverId: 'project-assistant-service', input, execute: () => Promise.resolve({ success: true }) });
+      return executeRemoteToolInvocation({ capabilityType, capabilityId, name, serverId: 'tasklist-server', input, execute: () => Promise.resolve({ success: true }) });
     },
   };
 }

@@ -10,6 +10,7 @@ import type { ToolCall, ToolResult, ToolExecutionContext, ToolHandler, ToolHandl
 
 const WEATHER_SERVER_ID = 'weather-server';
 const PROJECT_FILES_SERVER_ID = 'project-files-server';
+const TASKLIST_SERVER_ID = 'tasklist-server';
 
 const tsxPath = require('path').resolve(process.cwd(), 'node_modules/tsx/dist/cli.mjs');
 
@@ -23,6 +24,12 @@ mcpClientManager.register(PROJECT_FILES_SERVER_ID, {
   serverId: PROJECT_FILES_SERVER_ID,
   command: process.execPath,
   args: [tsxPath, require('path').resolve(process.cwd(), 'lib/mcp/servers/project-files-server.ts')],
+});
+
+mcpClientManager.register(TASKLIST_SERVER_ID, {
+  serverId: TASKLIST_SERVER_ID,
+  command: process.execPath,
+  args: [tsxPath, require('path').resolve(process.cwd(), 'lib/mcp/servers/tasklist-server.ts')],
 });
 
 const handlers = new Map<string, ToolHandler>();

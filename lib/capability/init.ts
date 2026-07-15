@@ -34,24 +34,24 @@ export function initCapabilities(): void {
   ));
 
   capabilityRegistry.register(createCapabilityDefinition(
-    { name: 'project://latest-context', capabilityType: 'resource', providerKind: 'mcp', location: 'remote', serverId: 'project-assistant-service' },
+    { name: 'project://latest-context', capabilityType: 'resource', providerKind: 'mcp', location: 'remote', serverId: 'tasklist-server' },
     '项目上下文',
     '获取项目最新上下文信息',
-    'limited'
+    'available'
   ));
 
   capabilityRegistry.register(createCapabilityDefinition(
-    { name: 'tasklist-draft', capabilityType: 'prompt', providerKind: 'mcp', location: 'remote', serverId: 'project-assistant-service' },
+    { name: 'tasklist-draft', capabilityType: 'prompt', providerKind: 'mcp', location: 'remote', serverId: 'tasklist-server' },
     '任务草稿',
     '生成任务列表草稿的上下文消息',
-    'limited'
+    'available'
   ));
 
   capabilityRegistry.register(createCapabilityDefinition(
-    { name: 'check_doc_consistency', capabilityType: 'tool', providerKind: 'mcp', location: 'remote', serverId: 'project-assistant-service' },
+    { name: 'check_doc_consistency', capabilityType: 'tool', providerKind: 'mcp', location: 'remote', serverId: 'tasklist-server' },
     '文档一致性检查',
     '检查文档之间的一致性',
-    'limited'
+    'available'
   ));
 
   capabilityRegistry.register(createCapabilityDefinition(

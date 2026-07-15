@@ -54,6 +54,12 @@ export class MCPClientManager {
     return client.callTool(toolName, arguments_);
   }
 
+  async getPrompt(serverId: string, promptName: string, args?: Record<string, unknown>): Promise<ReturnType<MCPClient['getPrompt']>> {
+    console.log(`[DEBUG-MCP-MGR] getPrompt - serverId: ${serverId}, promptName: ${promptName}`);
+    const client = await this.getClient(serverId);
+    return client.getPrompt(promptName, args);
+  }
+
   async readResource(serverId: string, uri: string): Promise<ReturnType<MCPClient['readResource']>> {
     console.log(`[DEBUG-MCP-MGR] readResource - serverId: ${serverId}, uri: ${uri}`);
     const client = await this.getClient(serverId);
