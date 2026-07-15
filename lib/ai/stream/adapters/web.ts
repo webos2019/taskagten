@@ -15,7 +15,11 @@ export class NDJSONWebWriter implements StreamWriter {
   }
 
   close(): void {
-    this.controller.close();
+    try {
+      this.controller.close();
+    } catch {
+      // 控制器可能已被 lifecycle.close() 关闭，忽略二次关闭错误
+    }
   }
 }
 

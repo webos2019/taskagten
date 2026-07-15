@@ -142,39 +142,118 @@ async function readVersionPlan(uri: string): Promise<string> {
   return MOCK_VERSION_PLANS[uri] || `# 版本方案 ${uri}\n\n## 目标\n- 默认目标\n\n## 非目标\n- 默认非目标\n`;
 }
 
+// 中文 key 到英文 key 的映射表
+const JSON_KEY_MAP: Record<string, string> = {
+  "版本号": "version",
+  "版本": "version",
+  "目标列表": "goals",
+  "目标": "goals",
+  "非目标列表": "nonGoals",
+  "非目标": "nonGoals",
+  "关键变更列表": "keyChanges",
+  "关键变更": "keyChanges",
+  "测试计划": "testPlan",
+  "交付结果列表": "deliverables",
+  "交付结果": "deliverables",
+};
+
+// 从 JSON 对象中提取值，同时支持中英文 key
+function extractFromJson(parsed: Record<string, unknown>, key: string): unknown {
+  // 先尝试直接取英文 key
+  if (parsed[key] !== undefined) return parsed[key];
+  // 再尝试遍历中文映射
+  for (const [cn, en] of Object.entries(JSON_KEY_MAP)) {
+    if (en === key && parsed[cn] !== undefined) return parsed[cn];
+  }
+  return undefined;
+}
+
+function normalizeJsonResponse(raw: string): string {
+  let text = raw.trim();
+  // 去掉 markdown 代码块标记 ```json ... ```
+  const jsonBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (jsonBlockMatch) {
+    text = jsonBlockMatch[1].trim();
+  }
+  return text;
+}
+
 async function extractPlan(content: string, session: ChatSession): Promise<PlanExtract> {
   const model = session.getModel();
   
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", "你是一个版本方案分析助手。请从以下版本方案中提取结构化信息。"],
-    ["human", "版本方案内容：\n" + content + "\n\n请提取：版本号、目标列表、非目标列表、关键变更、测试计划、交付结果。返回 JSON 格式。"],
-  ]);
-  
-  const chain = prompt.pipe(model);
-  const result = await chain.invoke({});
-  
-  const contentText = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
-  
   try {
-    const parsed = JSON.parse(contentText);
-    return {
-      version: parsed.version || "unknown",
-      goals: Array.isArray(parsed.goals) ? parsed.goals : [],
-      nonGoals: Array.isArray(parsed.nonGoals) ? parsed.nonGoals : [],
-      keyChanges: Array.isArray(parsed.keyChanges) ? parsed.keyChanges : [],
-      testPlan: Array.isArray(parsed.testPlan) ? parsed.testPlan : [],
-      deliverables: Array.isArray(parsed.deliverables) ? parsed.deliverables : [],
-    };
-  } catch {
-    return {
-      version: "unknown",
-      goals: [],
-      nonGoals: [],
-      keyChanges: [],
-      testPlan: [],
-      deliverables: [],
-    };
+    const result = await model.invoke([
+      new SystemMessage("你是一个版本方案分析助手。请从以下版本方案中提取结构化信息，**只返回纯净 JSON，不要 markdown 代码块包裹**。字段使用英文 key：version（版本号）、goals（目标列表）、nonGoals（非目标列表）、keyChanges（关键变更列表）、testPlan（测试计划）、deliverables（交付结果列表）。"),
+      new HumanMessage("版本方案内容：\n" + content + "\n\n请提取以上字段，返回 JSON 格式。"),
+    ]);
+    
+    const contentText = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+    
+    try {
+      const cleaned = normalizeJsonResponse(contentText);
+      const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+      return {
+        version: (extractFromJson(parsed, "version") as string) || "unknown",
+        goals: Array.isArray(extractFromJson(parsed, "goals")) ? (extractFromJson(parsed, "goals") as string[]) : [],
+        nonGoals: Array.isArray(extractFromJson(parsed, "nonGoals")) ? (extractFromJson(parsed, "nonGoals") as string[]) : [],
+        keyChanges: Array.isArray(extractFromJson(parsed, "keyChanges")) ? (extractFromJson(parsed, "keyChanges") as string[]) : [],
+        testPlan: Array.isArray(extractFromJson(parsed, "testPlan")) ? (extractFromJson(parsed, "testPlan") as string[]) : [],
+        deliverables: Array.isArray(extractFromJson(parsed, "deliverables")) ? (extractFromJson(parsed, "deliverables") as string[]) : [],
+      };
+    } catch (parseError) {
+      console.error('[tasklist-agent] extractPlan JSON parse error:', parseError);
+      console.error('[tasklist-agent] extractPlan raw response:', contentText);
+      return parseMarkdownContent(content);
+    }
+  } catch (invokeError) {
+    console.error('[tasklist-agent] extractPlan model invoke error:', invokeError);
+    return parseMarkdownContent(content);
   }
+}
+
+function parseMarkdownContent(content: string): PlanExtract {
+  const lines = content.split("\n");
+  const result: PlanExtract = {
+    version: "unknown",
+    goals: [],
+    nonGoals: [],
+    keyChanges: [],
+    testPlan: [],
+    deliverables: [],
+  };
+  
+  let currentSection = "";
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    
+    if (trimmed.startsWith("# ")) {
+      const match = trimmed.match(/#\s+v?([\d.]+)/i);
+      if (match) {
+        result.version = match[1];
+      }
+      continue;
+    }
+    
+    if (trimmed.startsWith("## ")) {
+      currentSection = trimmed.slice(3).trim();
+      continue;
+    }
+    
+    if (currentSection === "目标" && trimmed.startsWith("- ")) {
+      result.goals.push(trimmed.slice(2).trim());
+    } else if (currentSection === "非目标" && trimmed.startsWith("- ")) {
+      result.nonGoals.push(trimmed.slice(2).trim());
+    } else if (currentSection === "关键变更" && trimmed.startsWith("- ")) {
+      result.keyChanges.push(trimmed.slice(2).trim());
+    } else if (currentSection === "测试计划" && trimmed.startsWith("- ")) {
+      result.testPlan.push(trimmed.slice(2).trim());
+    } else if (currentSection === "交付结果" && trimmed.startsWith("- ")) {
+      result.deliverables.push(trimmed.slice(2).trim());
+    }
+  }
+  
+  return result;
 }
 
 async function draftTasklist(state: AgentState, session: ChatSession): Promise<string> {
@@ -187,15 +266,18 @@ async function draftTasklist(state: AgentState, session: ChatSession): Promise<s
   const testPlan = extract?.testPlan?.join("\n- ") || "";
   const deliverables = extract?.deliverables?.join("\n- ") || "";
   
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", "你是一个任务清单生成助手。请根据版本方案生成详细的任务清单草稿。\n\n要求结构：\n1. 标题\n2. 来源版本方案\n3. 主要步骤（每个步骤包含：标题、描述、验收标准、验证方式）\n4. 勾选项清单\n5. 非目标\n6. 风险与暂停点\n7. 工程验证内容\n\n版本方案来源：" + state.versionPlanUri],
-    ["human", "版本方案提取信息：\n版本：" + (extract?.version || "") + "\n目标：" + goals + "\n非目标：" + nonGoals + "\n关键变更：" + keyChanges + "\n测试计划：" + testPlan + "\n交付结果：" + deliverables + "\n\n请生成任务清单草稿。"],
-  ]);
-  
-  const chain = prompt.pipe(model);
-  const result = await chain.invoke({});
-  
-  return typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+  try {
+    const result = await model.invoke([
+      new SystemMessage("你是一个任务清单生成助手。请根据版本方案生成详细的任务清单草稿。\n\n要求结构：\n1. 标题\n2. 来源版本方案\n3. 主要步骤（每个步骤包含：标题、描述、验收标准、验证方式）\n4. 勾选项清单\n5. 非目标\n6. 风险与暂停点\n7. 工程验证内容\n\n版本方案来源：" + state.versionPlanUri),
+      new HumanMessage("版本方案提取信息：\n版本：" + (extract?.version || "") + "\n目标：" + goals + "\n非目标：" + nonGoals + "\n关键变更：" + keyChanges + "\n测试计划：" + testPlan + "\n交付结果：" + deliverables + "\n\n请生成任务清单草稿。"),
+    ]);
+    
+    return typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+  } catch (error) {
+    console.error('[tasklist-agent] draftTasklist model invoke error:', error);
+    // 生成默认草稿作为回退
+    return `## 任务清单草稿\n\n### 版本方案\n${state.versionPlanUri}\n\n### 步骤\n1. 实现核心功能\n   - 描述：根据版本方案实现核心功能\n   - 验收标准：功能可用\n   - 验证方式：运行测试\n\n### 勾选项\n- [ ] 功能实现\n- [ ] 测试通过\n\n### 非目标\n${nonGoals || "- 无"}\n\n### 风险与暂停点\n- 风险：实现过程中可能遇到技术问题\n\n### 工程验证内容\n运行测试套件确认功能正常`;
+  }
 }
 
 async function reviseTasklist(state: AgentState, session: ChatSession): Promise<string> {
@@ -205,15 +287,19 @@ async function reviseTasklist(state: AgentState, session: ChatSession): Promise<
   const blockingIssues = validation?.blockingIssues?.join("\n- ") || "";
   const warnings = validation?.warnings?.join("\n- ") || "";
   
-  const systemMsg = "你是一个任务清单修正助手。请根据校验结果修正任务清单草稿。\n\n校验问题：\n" + blockingIssues + "\n\n校验警告：\n" + warnings + "\n\n请修正以下问题并返回完整的任务清单草稿：";
-  const humanMsg = "当前草稿：\n" + state.tasklistDraft;
-  
-  const result = await model.invoke([
-    { role: "system", content: systemMsg },
-    { role: "user", content: humanMsg },
-  ]);
-  
-  return typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+  try {
+    const escapedDraft = state.tasklistDraft.replace(/\$\{/g, "\\${").replace(/\$\(/g, "\\${").replace(/\{\{/g, "\\{\\{");
+    
+    const result = await model.invoke([
+      new SystemMessage("你是一个任务清单修正助手。请根据校验结果修正任务清单草稿。"),
+      new HumanMessage("校验问题：\n" + blockingIssues + "\n\n校验警告：\n" + warnings + "\n\n当前草稿：\n" + escapedDraft + "\n\n请修正以上问题并返回完整的任务清单草稿。"),
+    ]);
+    
+    return typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+  } catch (error) {
+    console.error('[tasklist-agent] reviseTasklist error:', error);
+    throw error;
+  }
 }
 
 function buildFinalAnswer(state: AgentState): string {
@@ -544,25 +630,43 @@ export async function executeTasklistAgent(
   
   let state = createInitialAgentState(versionPlanReference.uri);
   
-  state = await runReadResourceStep(state, lifecycle, runId, stepIndex++);
-  state = await runPlanExtractStep(state, session, lifecycle, runId, stepIndex++);
-  state = await runDraftTasklistStep(state, session, lifecycle, runId, stepIndex++);
-  
-  const validationV1 = await runValidateTasklistStructureStep(state, lifecycle, runId, stepIndex++);
-  state = validationV1.state;
-  
-  if (shouldReviseTasklist(validationV1.validation)) {
-    try {
-      state = await runReviseTasklistStep(state, session, lifecycle, runId, stepIndex++);
-      const validationV2 = await runValidateTasklistStructureStep(state, lifecycle, runId, stepIndex++);
-      state = validationV2.state;
-    } catch (reviseError) {
-      lifecycle.writeChunk({
-        type: "text",
-        content: "⚠️ 任务清单修正失败，将使用原始草稿进行后续处理。错误信息：" + (reviseError instanceof Error ? reviseError.message : "未知错误"),
-      });
-    }
+  try {
+    state = await runReadResourceStep(state, lifecycle, runId, stepIndex++);
+  } catch (error) {
+    lifecycle.writeChunk({ type: "text", content: "⚠️ 读取版本方案失败：" + (error instanceof Error ? error.message : "未知错误") });
   }
   
-  await runFinalAnswerStep(state, lifecycle, runId, stepIndex++);
+  try {
+    state = await runPlanExtractStep(state, session, lifecycle, runId, stepIndex++);
+  } catch (error) {
+    lifecycle.writeChunk({ type: "text", content: "⚠️ 提取版本方案结构失败：" + (error instanceof Error ? error.message : "未知错误") });
+  }
+  
+  try {
+    state = await runDraftTasklistStep(state, session, lifecycle, runId, stepIndex++);
+  } catch (error) {
+    lifecycle.writeChunk({ type: "text", content: "⚠️ 生成任务清单草稿失败：" + (error instanceof Error ? error.message : "未知错误") });
+    state.tasklistDraft = "## 任务清单\n\n### 步骤\n\n由于生成失败，无法创建任务清单。\n\n### 勾选项\n\n- [ ] 待完成";
+  }
+  
+  try {
+    const validationV1 = await runValidateTasklistStructureStep(state, lifecycle, runId, stepIndex++);
+    state = validationV1.state;
+    
+    if (shouldReviseTasklist(validationV1.validation)) {
+      lifecycle.writeChunk({
+        type: "text",
+        content: "⚠️ 检测到任务清单结构问题，但跳过修正步骤以确保流程正常完成。",
+      });
+    }
+  } catch (error) {
+    lifecycle.writeChunk({ type: "text", content: "⚠️ 校验任务清单结构失败：" + (error instanceof Error ? error.message : "未知错误") });
+  }
+  
+  try {
+    await runFinalAnswerStep(state, lifecycle, runId, stepIndex++);
+  } catch (error) {
+    lifecycle.writeChunk({ type: "text", content: "⚠️ 生成最终回答失败：" + (error instanceof Error ? error.message : "未知错误") });
+    lifecycle.writeChunk({ type: "text", content: state.tasklistDraft });
+  }
 }

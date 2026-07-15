@@ -262,9 +262,21 @@ docs://versions/v0.1.0.md
     });
 
     it('should trigger tasklist agent when composer has tasklist command and version plan reference', async () => {
+      const mockModel = {
+        invoke: vi.fn().mockResolvedValue({
+          content: JSON.stringify({
+            version: 'v0.1.0',
+            goals: ['实现 Tasklist Agent', '入口控制'],
+            nonGoals: ['不做通用 Agent'],
+            keyChanges: ['添加运行时目录', '添加校验工具'],
+            testPlan: ['单元测试', '集成测试'],
+            deliverables: ['tasklist 草稿', '校验结论'],
+          }),
+        }),
+      };
       const mockSession: any = {
         getMessages: vi.fn().mockReturnValue([new HumanMessage('test')]),
-        getModel: vi.fn().mockReturnValue({}),
+        getModel: vi.fn().mockReturnValue(mockModel),
         getSystemPrompt: vi.fn().mockReturnValue('system prompt'),
         getSkillId: vi.fn().mockReturnValue('test-skill'),
         getComposerPayload: vi.fn().mockReturnValue({

@@ -24,6 +24,7 @@ export async function orchestrateChat(
   lifecycle.emitStartOnce(messageId);
 
   if (await runVersionPlanTasklistAgentEntryStage(session, lifecycle)) {
+    lifecycle.emitDoneOnce();
     lifecycle.close();
     return;
   }
@@ -128,6 +129,7 @@ export async function orchestrateChatWithLangGraph(
   lifecycle.emitStartOnce(messageId);
 
   if (await runVersionPlanTasklistAgentEntryStage(session, lifecycle)) {
+    lifecycle.emitDoneOnce();
     lifecycle.close();
     return;
   }
@@ -186,7 +188,6 @@ async function runLangGraphOrchestration(
   graph.addNode("GENERATE_SUMMARY", graphNodeExecutors["GENERATE_SUMMARY"]);
   graph.addNode("DIRECT_ANSWER", graphNodeExecutors["DIRECT_ANSWER"]);
   graph.addNode("CONSUME_LOCAL_CAPABILITY", graphNodeExecutors["CONSUME_LOCAL_CAPABILITY"]);
-  graph.addNode("FALLBACK", graphNodeExecutors["FALLBACK"]);
 
   graph.addEdge(START, "LLM_INVOKE");
   
@@ -223,7 +224,6 @@ async function runLangGraphOrchestration(
   graph.addEdge("GENERATE_SUMMARY", END);
   graph.addEdge("DIRECT_ANSWER", END);
   graph.addEdge("CONSUME_LOCAL_CAPABILITY", END);
-  graph.addEdge("FALLBACK", END);
 
   const app = graph.compile();
 
