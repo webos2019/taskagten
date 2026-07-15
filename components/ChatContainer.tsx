@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import type { ChatHookReturn } from "@/types/chat";
 import ChatMessageComponent from "./ChatMessage";
 import ChatInput from "./ChatInput";
+import AgentTracePanel from "./AgentTracePanel";
 import styles from "@/styles/ChatContainer.module.css";
 
 interface ChatContainerProps extends ChatHookReturn {
@@ -15,6 +16,7 @@ export default function ChatContainer(props: ChatContainerProps) {
     messages,
     streamingBlocks,
     streamingText,
+    agentSteps,
     status,
     error,
     mode,
@@ -195,6 +197,12 @@ export default function ChatContainer(props: ChatContainerProps) {
                   streamingText={streamingText}
                   streamingBlocks={streamingBlocks}
                 />
+              )}
+
+              {isStreaming && agentSteps.length > 0 && (
+                <div className="ml-12">
+                  <AgentTracePanel steps={agentSteps} />
+                </div>
               )}
 
               {error && (

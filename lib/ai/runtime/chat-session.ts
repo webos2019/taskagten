@@ -7,6 +7,11 @@ import { getDeepSeekModel } from "@/lib/deepseek";
 export interface ChatSessionConfig {
   skillId: string;
   messages: Array<{ role: string; content: string; files?: { name: string; type: string; content: string }[] }>;
+  composer?: {
+    command?: { name: string; label: string };
+    plainText: string;
+    references?: Array<{ id: string; label: string; uri: string; type: string; source: string }>;
+  };
 }
 
 export interface ChatSession {
@@ -14,6 +19,7 @@ export interface ChatSession {
   getSkillId(): string;
   getSystemPrompt(): string;
   getModel(): ReturnType<typeof getDeepSeekModel> | Runnable<BaseLanguageModelInput, AIMessageChunk>;
+  getComposerPayload?(): ChatSessionConfig["composer"];
 }
 
 export function createChatSession(config: ChatSessionConfig): ChatSession {
@@ -39,6 +45,9 @@ export function createChatSession(config: ChatSessionConfig): ChatSession {
       return tools.length > 0
         ? getDeepSeekModel().bindTools(tools)
         : getDeepSeekModel();
+    },
+    getComposerPayload() {
+      return config.composer;
     },
   };
 }

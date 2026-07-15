@@ -36,6 +36,7 @@ export function useChatStream(): ChatHookReturn {
   const {
     streamingBlocks,
     streamingText,
+    agentSteps,
     addChunk,
     clearBuffer,
   } = useStreamTextBuffer();
@@ -59,6 +60,38 @@ export function useChatStream(): ChatHookReturn {
 
     const cutoffIndex = assistantIndices[assistantIndices.length - MAX_CONTEXT_ROUNDS];
     return msgs.slice(cutoffIndex);
+  }, []);
+
+  const parseCommand = useCallback((text: string) => {
+    const commandMatch = text.match(/^\/(\w+)\s*(.+)?$/);
+    if (!commandMatch) {
+      return null;
+    }
+
+    const commandName = commandMatch[1];
+    const rest = commandMatch[2] || "";
+
+    const versionPlanPattern = /@(docs:\/\/versions\/[^/\s]+\.md)/gi;
+    const references: Array<{ id: string; label: string; uri: string; type: "resource"; source: "remote" }> = [];
+    let match;
+    while ((match = versionPlanPattern.exec(rest)) !== null) {
+      const uri = match[1];
+      references.push({
+        id: uri,
+        label: uri.replace("docs://versions/", ""),
+        uri,
+        type: "resource",
+        source: "remote",
+      });
+    }
+
+    const plainText = rest.replace(versionPlanPattern, "").trim();
+
+    return {
+      command: { name: commandName as "check" | "summary" | "tasklist", label: commandName },
+      plainText,
+      references,
+    };
   }, []);
 
   const sendMessage = useCallback(
@@ -99,11 +132,15 @@ export function useChatStream(): ChatHookReturn {
       const updatedMessages = [...messages, userMessage];
       setMessages(updatedMessages);
 
+      const composer = parseCommand(text);
+
+      console.log('[useChatStream] composer:', JSON.stringify(composer, null, 2));
+
       try {
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: updatedMessages, skill, clientIP }),
+          body: JSON.stringify({ messages: updatedMessages, skill, clientIP, composer }),
           signal: controller.signal,
         });
 
@@ -290,6 +327,7 @@ export function useChatStream(): ChatHookReturn {
     messages,
     streamingBlocks,
     streamingText,
+    agentSteps,
     status,
     error,
     mode: skill,

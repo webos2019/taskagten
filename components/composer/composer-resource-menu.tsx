@@ -22,6 +22,24 @@ const MOCK_RESOURCES: ResourceItem[] = [
     uri: 'project://latest-context',
     source: 'local',
   },
+  {
+    id: 'v0.1.0-controlled-version-plan',
+    label: 'v0.1.0 受控版：版本方案到任务清单 Agent',
+    uri: 'docs://versions/v0.1.0-controlled-version-plan-to-tasklist-agent.md',
+    source: 'remote',
+  },
+  {
+    id: 'v0.2.0-composer-v1',
+    label: 'v0.2.0 Composer V1：结构化输入层',
+    uri: 'docs://versions/v0.2.0-composer-v1-structured-input-layer.md',
+    source: 'remote',
+  },
+  {
+    id: 'v0.3.0-langgraph-migration',
+    label: 'v0.3.0 LangGraph 迁移：有状态工作流',
+    uri: 'docs://versions/v0.3.0-langgraph-migration-stateful-workflow.md',
+    source: 'remote',
+  },
 ];
 
 function getResources(query: string): ResourceItem[] {

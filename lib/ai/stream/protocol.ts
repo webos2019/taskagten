@@ -10,7 +10,9 @@ export type StreamChunkType =
   | "error"
   | "recovering"
   | "recovery_fallback"
-  | "done";
+  | "done"
+  | "agent-step-start"
+  | "agent-step-end";
 
 export interface StreamChunkBase {
   type: StreamChunkType;
@@ -100,6 +102,30 @@ export interface DoneChunk extends StreamChunkBase {
   type: "done";
 }
 
+export type AgentStepActionType = "read_resource" | "plan_extract" | "draft_tasklist" | "validate_tasklist_structure" | "revise_tasklist" | "final_answer";
+
+export type AgentStepStatus = "running" | "completed" | "failed";
+
+export interface AgentStepStartChunk extends StreamChunkBase {
+  actionType: AgentStepActionType;
+  agentName: string;
+  partId: string;
+  runId: string;
+  stepIndex: number;
+  title: string;
+  type: "agent-step-start";
+}
+
+export interface AgentStepEndChunk extends StreamChunkBase {
+  durationMs?: number;
+  error?: string;
+  partId: string;
+  runId: string;
+  status: AgentStepStatus;
+  summary?: string;
+  type: "agent-step-end";
+}
+
 export type ChatStreamChunk =
   | StartChunk
   | TextChunk
@@ -112,7 +138,9 @@ export type ChatStreamChunk =
   | ErrorChunk
   | RecoveringChunk
   | RecoveryFallbackChunk
-  | DoneChunk;
+  | DoneChunk
+  | AgentStepStartChunk
+  | AgentStepEndChunk;
 
 export function createStartChunk(messageId: string): StartChunk {
   return { type: "start", messageId };

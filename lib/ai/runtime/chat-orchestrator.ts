@@ -5,6 +5,7 @@ import { createInitialState, applyStatePatch, type OrchestrationState, type Stat
 import { stepExecutors, type StepOperationOptions, graphNodeExecutors } from "./orchestration-steps";
 import { determineNextNode, isTerminalNode, configureGraphWithRoutes } from "./orchestration-router";
 import { createOrchestrationGraph, GraphStateSchema } from "./orchestration-state";
+import { runVersionPlanTasklistAgentEntryStage } from "../agents/tasklist-agent/agent-entry";
 
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 2000;
@@ -21,6 +22,11 @@ export async function orchestrateChat(
   const lifecycle = new StreamLifecycle(writer);
   const messageId = createId();
   lifecycle.emitStartOnce(messageId);
+
+  if (await runVersionPlanTasklistAgentEntryStage(session, lifecycle)) {
+    lifecycle.close();
+    return;
+  }
 
   let recoveryAttempts = 0;
 
@@ -120,6 +126,11 @@ export async function orchestrateChatWithLangGraph(
   const lifecycle = new StreamLifecycle(writer);
   const messageId = createId();
   lifecycle.emitStartOnce(messageId);
+
+  if (await runVersionPlanTasklistAgentEntryStage(session, lifecycle)) {
+    lifecycle.close();
+    return;
+  }
 
   let recoveryAttempts = 0;
 

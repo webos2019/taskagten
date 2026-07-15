@@ -1,20 +1,80 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { StructuredBlock, StreamChunk } from "@/types/chat";
+
+export interface AgentStepData {
+  actionType?: string;
+  agentName?: string;
+  partId?: string;
+  runId?: string;
+  stepIndex?: number;
+  title?: string;
+  status?: string;
+  durationMs?: number;
+  error?: string;
+  summary?: string;
+}
 
 export interface StreamTextBufferResult {
   streamingBlocks: StructuredBlock[];
   streamingText: string;
+  agentSteps: AgentStepData[];
   addChunk: (chunk: StreamChunk) => void;
   clearBuffer: () => void;
 }
 
 export function useStreamTextBuffer(): StreamTextBufferResult {
   const [streamingBlocks, setStreamingBlocks] = useState<StructuredBlock[]>([]);
+  const [agentSteps, setAgentSteps] = useState<AgentStepData[]>([]);
+  const hasMounted = useRef(false);
+
+  useEffect(() => {
+    if (!hasMounted.current && process.env.NEXT_PUBLIC_DEBUG_AGENT_TRACE === "true") {
+      hasMounted.current = true;
+      const mockSteps: AgentStepData[] = [
+        { actionType: "read_resource", agentName: "tasklist-agent", partId: "step-0", stepIndex: 0, title: "读取版本方案", status: "completed", durationMs: 120, summary: "已读取版本方案: docs://versions/v0.1.0.md" },
+        { actionType: "plan_extract", agentName: "tasklist-agent", partId: "step-1", stepIndex: 1, title: "提取版本方案结构", status: "completed", durationMs: 850, summary: "已提取 5 个目标" },
+        { actionType: "draft_tasklist", agentName: "tasklist-agent", partId: "step-2", stepIndex: 2, title: "生成任务清单草稿 v1", status: "completed", durationMs: 2340, summary: "草稿已生成 (1250 字符)" },
+        { actionType: "validate_tasklist_structure", agentName: "tasklist-agent", partId: "step-3", stepIndex: 3, title: "结构校验", status: "completed", durationMs: 56, summary: "校验通过" },
+        { actionType: "final_answer", agentName: "tasklist-agent", partId: "step-4", stepIndex: 4, title: "生成最终回答", status: "running" },
+      ];
+      setAgentSteps(mockSteps);
+    }
+  }, []);
 
   const addChunk = useCallback((chunk: StreamChunk) => {
     console.log('[StreamChunk] Received:', chunk);
+    
+    if (chunk.type === "agent-step-start") {
+      setAgentSteps((prev) => [
+        ...prev,
+        {
+          actionType: chunk.actionType,
+          agentName: chunk.agentName,
+          partId: chunk.partId,
+          runId: chunk.runId,
+          stepIndex: chunk.stepIndex,
+          title: chunk.title,
+          status: "running",
+        },
+      ]);
+    } else if (chunk.type === "agent-step-end") {
+      setAgentSteps((prev) =>
+        prev.map((step) =>
+          step.partId === chunk.partId
+            ? {
+                ...step,
+                status: chunk.status,
+                durationMs: chunk.durationMs,
+                error: chunk.error,
+                summary: chunk.summary,
+              }
+            : step
+        )
+      );
+    }
+    
     setStreamingBlocks((prev) => {
       const blocks = [...prev];
       
@@ -124,6 +184,7 @@ export function useStreamTextBuffer(): StreamTextBufferResult {
 
   const clearBuffer = useCallback(() => {
     setStreamingBlocks([]);
+    setAgentSteps([]);
   }, []);
 
   const streamingText = streamingBlocks
@@ -142,6 +203,7 @@ export function useStreamTextBuffer(): StreamTextBufferResult {
   return {
     streamingBlocks,
     streamingText,
+    agentSteps,
     addChunk,
     clearBuffer,
   };

@@ -10,6 +10,11 @@ export interface ChatRequest {
   messages: Array<{ role: string; content: string; files?: { name: string; type: string; content: string }[] }>;
   skill?: SkillId;
   clientIP?: string;
+  composer?: {
+    command?: { name: string; label: string };
+    plainText: string;
+    references?: Array<{ id: string; label: string; uri: string; type: string; source: string }>;
+  };
 }
 
 export interface ChatExecutionContext {
@@ -34,6 +39,7 @@ export function createChatService(_deps: ChatServiceDependencies = {}) {
       const session = createChatSession({
         skillId: resolvedSkill,
         messages,
+        composer: request.composer,
       });
 
       const streamResult = await createChatStreamResult(session, resolvedIP);

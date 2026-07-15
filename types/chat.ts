@@ -42,7 +42,12 @@ export type StreamChunkType =
   | "done"
   | "error"
   | "recovering"
-  | "recovery_fallback";
+  | "recovery_fallback"
+  | "agent-step-start"
+  | "agent-step-end";
+
+export type AgentStepActionType = "read_resource" | "plan_extract" | "draft_tasklist" | "validate_tasklist_structure" | "revise_tasklist" | "final_answer";
+export type AgentStepStatus = "running" | "completed" | "failed";
 
 export interface StreamChunk {
   type: StreamChunkType;
@@ -71,6 +76,15 @@ export interface StreamChunk {
   attempt?: number;
   maxAttempts?: number;
   fallbackMethod?: string;
+  actionType?: AgentStepActionType;
+  agentName?: string;
+  partId?: string;
+  runId?: string;
+  stepIndex?: number;
+  title?: string;
+  status?: AgentStepStatus;
+  durationMs?: number;
+  summary?: string;
 }
 
 export type SkillId = "utility-skill" | "reader-skill";
@@ -107,6 +121,18 @@ export interface ChatHookReturn {
   messages: ChatMessage[];
   streamingBlocks: StructuredBlock[];
   streamingText: string;
+  agentSteps: Array<{
+    actionType?: string;
+    agentName?: string;
+    partId?: string;
+    runId?: string;
+    stepIndex?: number;
+    title?: string;
+    status?: string;
+    durationMs?: number;
+    error?: string;
+    summary?: string;
+  }>;
   status: StreamStatus;
   error: string | null;
   mode: SkillId;
